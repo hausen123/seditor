@@ -27,6 +27,36 @@ use ratatui::{
     },
 };
 
+const WIDTH: usize = 80;
+
+/// 子を並べる位置の決め方。
+enum Style {
+    /// 先頭のn個を見出し行に残し、残りを+2桁に置く。
+    Body(usize),
+    /// 子を第1子の桁に揃える。
+    Align,
+}
+
+/// 幅に収まっても必ず改行する形。
+fn always_break(text: &str) -> bool {
+    matches!(
+        text,
+        "define" | "lambda" | "let" | "let*" | "letrec"
+            | "letrec*" | "when" | "unless" | "case"
+            | "do" | "begin" | "cond"
+    )
+}
+
+/// outputの末尾がいま何桁目にあるか。
+fn current_column(output: &str) -> usize {
+    match output.rfind('\n') {
+        Some(position) => {
+            output[position + 1..].chars().count()
+        }
+        None => output.chars().count(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Node {
     text: String,
@@ -209,10 +239,16 @@ impl App {
                 ""
             };
 
+            let text = if self.nodes[index].text.is_empty() {
+                "◦"
+            } else {
+                &self.nodes[index].text
+            };
+
             lines.push(format!(
                 "{}{}{}",
                 prefix,
-                self.nodes[index].text,
+                text,
                 cursor
             ));
         }
@@ -251,13 +287,15 @@ impl App {
         prefix
     }
 
+    /// indexの祖先のうち、深さlevel+1のものを返す。
+    ///
+    /// levelは罫線の桁番号で、左端が0。
     fn find_ancestor(
         &self,
         index: usize,
         level: usize,
     ) -> usize {
-        let target_depth =
-            self.nodes[index].depth - level - 1;
+        let target_depth = level + 1;
 
         let mut i = index;
 
@@ -298,23 +336,7 @@ impl App {
     // S式への変換
     // ------------------------------------------------------------
 
-    fn to_scheme(&self) -> String {
-        if self.nodes.is_empty() {
-            return String::new();
-        }
-
-        let mut output = String::new();
-
-        self.write_expression(
-            0,
-            self.nodes[0].depth,
-            &mut output,
-        );
-
-        output
-    }
-
-    /// indexを先頭とする1つのS式を書き出す。
+    /// 木全体を整形して書き出す。
     ///
     /// 例えば
     ///
@@ -327,51 +349,186 @@ impl App {
     ///
     /// を
     ///
-    /// (define (square x) (* x x))
+    /// (define (square x)
+    ///   (* x x))
     ///
     /// にする。
-    fn write_expression(
-        &self,
-        index: usize,
-        depth: usize,
-        output: &mut String,
-    ) -> usize {
-        output.push('(');
+    fn to_scheme(&self) -> String {
+        let mut output = String::new();
+        for index in 0..self.nodes.len() {
+            if self.nodes[index].depth != 0 {
+                continue;
+            }
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            self.write_pretty(index, &mut output);
+        }
+        output
+    }
 
-        output.push_str(
-            self.nodes[index].text.trim()
-        );
-
+    /// indexの直接の子を列挙する。
+    fn children(&self, index: usize) -> Vec<usize> {
+        let depth = self.nodes[index].depth;
+        let mut result = Vec::new();
         let mut i = index + 1;
-
         while i < self.nodes.len() {
-            let child_depth =
-                self.nodes[i].depth;
-
+            let child_depth = self.nodes[i].depth;
             if child_depth <= depth {
                 break;
             }
-
             if child_depth == depth + 1 {
-                output.push(' ');
+                result.push(i);
+            }
+            // 不正な深さのノードは読み飛ばす。
+            i += 1;
+        }
+        result
+    }
 
-                i = self.write_expression(
-                    i,
-                    child_depth,
+    /// '(a b) の ' のように、子1つの前に付いて
+    /// 括弧を足さないノードかどうか。
+    ///
+    /// #t や #\a のように子を持たないものは
+    /// この判定を通らずアトムとして扱われる。
+    fn is_marker(&self, index: usize) -> bool {
+        if self.children(index).len() != 1 {
+            return false;
+        }
+        let text = self.nodes[index].text.trim();
+        matches!(
+            text,
+            "'" | "`" | "," | ",@" | "#;" | "#" | "#u8"
+        ) || (text.starts_with('#')
+            && text.ends_with('=')
+            && text.len() > 2)
+    }
+
+    /// indexのS式を改行なしで書き出す。
+    ///
+    /// 幅に収まるかどうかの判定に使う。
+    fn flat(&self, index: usize) -> String {
+        let text = self.nodes[index].text.trim();
+        let children = self.children(index);
+        if self.is_marker(index) {
+            return format!(
+                "{}{}",
+                text,
+                self.flat(children[0])
+            );
+        }
+        if !text.is_empty() && children.is_empty() {
+            return text.to_string();
+        }
+        let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(text.to_string());
+        }
+        for child in children {
+            parts.push(self.flat(child));
+        }
+        format!("({})", parts.join(" "))
+    }
+
+    fn style(&self, index: usize) -> Style {
+        let text = self.nodes[index].text.trim();
+        // 名前付きlet (let loop ((i 0)) ...) は
+        // 名前と束縛リストの2つを見出し行に置く。
+        if text == "let"
+            && self
+                .children(index)
+                .first()
+                .is_some_and(|&child| {
+                    !self.nodes[child]
+                        .text
+                        .trim()
+                        .is_empty()
+                        && self.children(child).is_empty()
+                })
+        {
+            return Style::Body(2);
+        }
+        match text {
+            "define" | "lambda" | "let" | "let*"
+            | "letrec" | "letrec*" | "when"
+            | "unless" | "case" => Style::Body(1),
+            "do" => Style::Body(2),
+            "begin" => Style::Body(0),
+            _ => Style::Align,
+        }
+    }
+
+    /// indexのS式を整形して書き出す。
+    ///
+    /// 開始桁はoutputの末尾から求めるので、
+    /// 呼ぶ側は字下げの空白を書いてから渡すこと。
+    fn write_pretty(
+        &self,
+        index: usize,
+        output: &mut String,
+    ) {
+        let indent = current_column(output);
+        let text = self.nodes[index].text.trim();
+        let children = self.children(index);
+        if self.is_marker(index) {
+            output.push_str(text);
+            self.write_pretty(children[0], output);
+            return;
+        }
+        let flat = self.flat(index);
+        if children.is_empty()
+            || (!always_break(text)
+                && indent + flat.chars().count()
+                    <= WIDTH)
+        {
+            output.push_str(&flat);
+            return;
+        }
+        output.push('(');
+        if !text.is_empty() {
+            output.push_str(text);
+        }
+        match self.style(index) {
+            Style::Body(count) => {
+                let count = count.min(children.len());
+                for &child in &children[..count] {
+                    output.push(' ');
+                    self.write_pretty(child, output);
+                }
+                self.write_children(
+                    &children[count..],
+                    indent + 2,
                     output,
                 );
-            } else {
-                // 不正な深さになっている場合。
-                //
-                // 通常の操作では発生しないように
-                // indent()で制限している。
-                i += 1;
+            }
+            Style::Align => {
+                if !text.is_empty() {
+                    output.push(' ');
+                }
+                let column = current_column(output);
+                self.write_pretty(children[0], output);
+                self.write_children(
+                    &children[1..],
+                    column,
+                    output,
+                );
             }
         }
-
         output.push(')');
+    }
 
-        i
+    /// 残りの子を1行ずつcolumn桁から書き出す。
+    fn write_children(
+        &self,
+        children: &[usize],
+        column: usize,
+        output: &mut String,
+    ) {
+        for &child in children {
+            output.push('\n');
+            output.push_str(&" ".repeat(column));
+            self.write_pretty(child, output);
+        }
     }
 
     // ------------------------------------------------------------
@@ -538,4 +695,224 @@ fn run(
     }
 
     Ok(())
+}
+
+
+
+// ------------------------------------------------------------
+// テスト
+// ------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// キー列をhandle_keyに流し込み、TUIと同じ経路を辿る。
+    ///
+    /// `\t` はTab、`\n` はEnter、`\x08` はShift-Tab。
+    fn press(app: &mut App, keys: &str) {
+        for key in keys.chars() {
+            let code = match key {
+                '\t' => KeyCode::Tab,
+                '\n' => KeyCode::Enter,
+                '\x08' => KeyCode::BackTab,
+                _ => KeyCode::Char(key),
+            };
+            app.handle_key(KeyEvent::new(
+                code,
+                KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// キー列を打ってからF2の出力を得る。
+    fn scheme(keys: &str) -> String {
+        let mut app = App::new();
+        press(&mut app, keys);
+        app.to_scheme()
+    }
+
+    /// キー列を打ってからカーソル表示を除いた木を得る。
+    fn tree(keys: &str) -> String {
+        let mut app = App::new();
+        press(&mut app, keys);
+        app.tree_lines().join("\n").replace('▌', "")
+    }
+
+    fn check(cases: &[(&str, &str)]) {
+        for (keys, expected) in cases {
+            assert_eq!(
+                scheme(keys),
+                *expected,
+                "\nキー列: {:?}",
+                keys
+            );
+        }
+    }
+
+    /// データの表記。
+    #[test]
+    fn notation() {
+        check(&[
+            // 空リストとアトム
+            ("", "()"),
+            ("x", "x"),
+            ("f\n\t", "(f ())"),
+            // テキストがcar、子がcdr
+            ("f\n\ta", "(f a)"),
+            ("+\n\t1\n2", "(+ 1 2)"),
+            // 先頭にシンボルを持たないリスト
+            ("\n\ta\nb", "(a b)"),
+            // ドット対
+            ("a\n\t.\nb", "(a . b)"),
+            ("f\n\ta\n.\nrest", "(f a . rest)"),
+        ]);
+    }
+
+    /// 印ノード。子1つの前に付き、括弧を足さない。
+    #[test]
+    fn markers() {
+        check(&[
+            ("'\n\ta\n\tb", "'(a b)"),
+            ("`\n\ta\n\t,b", "`(a ,b)"),
+            (",@\n\ta\n\tb", ",@(a b)"),
+            ("#\n\t1\n\t2", "#(1 2)"),
+            ("#u8\n\t1\n\t2", "#u8(1 2)"),
+            ("#;\n\ta\n\tb", "#;(a b)"),
+            ("#0=\n\ta\n\tb", "#0=(a b)"),
+            // 入れ子の擬似引用
+            ("`\n\ta\n\t`\n\tb\n\t,c", "`(a `(b ,c))"),
+            // 引用付きシンボルはただのテキスト
+            ("\n\t'a\nb", "('a b)"),
+        ]);
+    }
+
+    /// #で始まるが子を持たないものはアトム。
+    #[test]
+    fn hash_atoms() {
+        check(&[
+            ("#t", "#t"),
+            ("list\n\t#t\n#f\n#\\a", "(list #t #f #\\a)"),
+            ("#!fold-case", "#!fold-case"),
+        ]);
+    }
+
+    /// 本体インデント型。短くても必ず改行する。
+    #[test]
+    fn body_forms() {
+        check(&[
+            (
+                "define\n\tsquare\n\tx\n\x08*\n\tx\nx",
+                "(define (square x)\n  (* x x))",
+            ),
+            (
+                "lambda\n\t\n\tx\n\x08*\n\tx\nx",
+                "(lambda (x)\n  (* x x))",
+            ),
+            ("when\n\ta\nb\nc", "(when a\n  b\n  c)"),
+            ("begin\n\ta\nb", "(begin\n  a\n  b)"),
+            (
+                "let\n\t\n\tx\n\t1\n\x08y\n\t2\n\x08\x08body",
+                "(let ((x 1) (y 2))\n  body)",
+            ),
+            (
+                "let\n\tloop\n\n\ti\n\t0\n\x08\x08body",
+                "(let loop ((i 0))\n  body)",
+            ),
+            (
+                "do\n\t\n\ti\n\t0\n\x08\x08\n\t=\n\ti\n5\n\x08\x08body",
+                "(do ((i 0)) ((= i 5))\n  body)",
+            ),
+            (
+                "case\n\tx\n\n\t1\n\t2\n\x08'a\n\x08\n\telse\n'b",
+                "(case x\n  ((1 2) 'a)\n  (else 'b))",
+            ),
+        ]);
+    }
+
+    /// 整列型。子を第1子の桁に揃える。
+    #[test]
+    fn align_forms() {
+        check(&[
+            (
+                "cond\n\t\n\t<\n\tx\n2\n\x081\n\x08\n\t>\n\tx\n2\n\x08-1",
+                "(cond ((< x 2) 1)\n      ((> x 2) -1))",
+            ),
+            (
+                "cond\n\t\n\tassv\n\tk\nal\n\x08=>\ncdr\n\x08\n\telse\n#f",
+                "(cond ((assv k al) => cdr)\n      (else #f))",
+            ),
+            // 幅に収まるので1行
+            ("and\n\ta\nb", "(and a b)"),
+            ("or\n\ta\nb", "(or a b)"),
+            // 幅を超えるので第1引数の桁で折り返す
+            (
+                "some-quite-long-function-name\n\
+                 \taaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+                 bbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "(some-quite-long-function-name \
+                 aaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+                 \x20                              \
+                 bbbbbbbbbbbbbbbbbbbbbbbbbbb)",
+            ),
+        ]);
+    }
+
+    /// トップレベルの式は空行で区切る。
+    #[test]
+    fn toplevel() {
+        check(&[
+            ("a\nb", "a\n\nb"),
+            (
+                "define\n\ta\n1\n\x08define\n\tb\n2",
+                "(define a\n  1)\n\n(define b\n  2)",
+            ),
+        ]);
+    }
+
+    /// 印ノードの子が1つでない場合は普通のリストとして出す。
+    #[test]
+    fn marker_wrong_arity() {
+        check(&[
+            ("'\n\ta\nb", "(' a b)"),
+            ("'", "'"),
+        ]);
+    }
+
+    /// 深い木の罫線。
+    #[test]
+    fn tree_view() {
+        assert_eq!(
+            tree("cond\n\t\n\t<\n\tx\n2\n\x081\n\x08\n\t>\n\tx\n2\n\x08-1"),
+            "cond\n\
+             ├── ◦\n\
+             │   ├── <\n\
+             │   │   ├── x\n\
+             │   │   └── 2\n\
+             │   └── 1\n\
+             └── ◦\n\
+             \x20   ├── >\n\
+             \x20   │   ├── x\n\
+             \x20   │   └── 2\n\
+             \x20   └── -1"
+        );
+        assert_eq!(
+            tree("`\n\ta\n\t`\n\tb\n\t,c"),
+            "`\n\
+             └── a\n\
+             \x20   └── `\n\
+             \x20       └── b\n\
+             \x20           └── ,c"
+        );
+        assert_eq!(
+            tree("let\n\t\n\tx\n\t1\n\x08y\n\t2\n\x08\x08body"),
+            "let\n\
+             ├── ◦\n\
+             │   ├── x\n\
+             │   │   └── 1\n\
+             │   └── y\n\
+             │       └── 2\n\
+             └── body"
+        );
+    }
 }
