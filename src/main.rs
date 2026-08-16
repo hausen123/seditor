@@ -457,7 +457,15 @@ impl App {
     }
 
     /// カーソル位置の1文字を消す。
+    ///
+    /// ◦ には消す文字が無いので、ddと同じく
+    /// ノードごと消して子を1段持ち上げる。
     fn delete_char(&mut self) {
+        if self.text().is_empty() {
+            self.delete_node();
+            return;
+        }
+
         let column = self.cursor_col;
         let node = &mut self.nodes[self.cursor];
         if column >= node.text.len() {
@@ -479,7 +487,31 @@ impl App {
         self.record();
     }
 
+    /// カーソルの手前の1文字を消す。
+    ///
+    /// ◦ の上ではノードごと消して、前のノードの
+    /// 末尾に戻る。Enterを取り消す動きになる。
     fn backspace(&mut self) {
+        if self.text().is_empty() {
+            if self.cursor == 0 {
+                self.delete_node();
+                self.cursor_col = 0;
+                return;
+            }
+
+            // 消すと末尾のときにdelete_nodeが
+            // カーソルを前に丸めるので、消す前の
+            // 位置から前のノードを決めておく。
+            let previous = self.cursor - 1;
+
+            self.delete_node();
+
+            self.cursor = previous;
+            self.cursor_col = self.text().len();
+
+            return;
+        }
+
         if self.cursor_col == 0 {
             return;
         }
@@ -1297,7 +1329,8 @@ mod tests {
     /// キー列をhandle_keyに流し込み、TUIと同じ経路を辿る。
     ///
     /// `\t` はTab、`\n` はEnter、`\x08` はShift-Tab、
-    /// `\x1b` はEsc、`\x7f` はBackspace。
+    /// `\x1b` はEsc、`\x7f` はBackspace、
+    /// `\x04` はDelete。
     fn press(app: &mut App, keys: &str) {
         for key in keys.chars() {
             let code = match key {
@@ -1306,6 +1339,7 @@ mod tests {
                 '\x08' => KeyCode::BackTab,
                 '\x1b' => KeyCode::Esc,
                 '\x7f' => KeyCode::Backspace,
+                '\x04' => KeyCode::Delete,
                 _ => KeyCode::Char(key),
             };
             app.handle_key(KeyEvent::new(
@@ -1832,5 +1866,49 @@ mod tests {
         assert!(app.undo.is_empty());
         assert!(app.redo.is_empty());
         let _ = fs::remove_file(&path);
+    }
+
+    /// ◦ の上では x も Backspace も Delete も
+    /// ノードごと消す。
+    #[test]
+    fn delete_on_empty_node() {
+        // x はddと同じく子を1段持ち上げる。
+        let mut app = insert("f\n\t\n\ta");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f (a))");
+        press(&mut app, "kx");
+        assert_eq!(app.to_scheme(), "(f a)");
+        // 挿入モードのDeleteも同じ。
+        let mut app = insert("f\n\t");
+        assert_eq!(app.to_scheme(), "(f ())");
+        press(&mut app, "\x04");
+        assert_eq!(app.to_scheme(), "f");
+        // Backspaceは前のノードの末尾に戻る。
+        let mut app = insert("abc\n\t");
+        assert_eq!(app.to_scheme(), "(abc ())");
+        press(&mut app, "\x7f");
+        assert_eq!(app.to_scheme(), "abc");
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.cursor_col, 3);
+        // 挿入モードのままなので続けて打てる。
+        press(&mut app, "d");
+        assert_eq!(app.to_scheme(), "abcd");
+        // 末尾の ◦ を消しても2つ上に飛ばない。
+        let mut app = insert("a\nb\n\t");
+        assert_eq!(app.to_scheme(), "a\n\n(b ())");
+        press(&mut app, "\x7f");
+        assert_eq!(app.to_scheme(), "a\n\nb");
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.cursor_col, 1);
+        // 先頭の ◦ では前に戻らない。
+        let mut app = insert("\nx");
+        press(&mut app, "\x1bkk");
+        assert_eq!(app.cursor, 0);
+        press(&mut app, "i\x7f");
+        assert_eq!(app.to_scheme(), "x");
+        assert_eq!(app.cursor_col, 0);
+        // 消したぶんは u で戻る。
+        press(&mut app, "\x1bu");
+        assert_eq!(app.to_scheme(), "()\n\nx");
     }
 }
