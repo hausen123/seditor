@@ -1,5 +1,10 @@
+mod reader;
+
+use reader::Datum;
+
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -63,6 +68,80 @@ fn current_column(output: &str) -> usize {
 struct Node {
     text: String,
     depth: usize,
+}
+
+/// 読み取ったデータをノード列に直す。
+fn nodes_from(data: &[Datum]) -> Vec<Node> {
+    let mut nodes = Vec::new();
+
+    for datum in data {
+        emit(datum, 0, &mut nodes);
+    }
+
+    if nodes.is_empty() {
+        nodes.push(Node {
+            text: String::new(),
+            depth: 0,
+        });
+    }
+
+    nodes
+}
+
+fn emit(
+    datum: &Datum,
+    depth: usize,
+    nodes: &mut Vec<Node>,
+) {
+    match datum {
+        Datum::Atom(text) | Datum::Comment(text) => {
+            nodes.push(Node {
+                text: text.clone(),
+                depth,
+            })
+        }
+        Datum::Marker(mark, child) => {
+            nodes.push(Node {
+                text: mark.clone(),
+                depth,
+            });
+            emit(child, depth + 1, nodes);
+        }
+        Datum::List(items) => {
+            // 先頭がアトムなら見出しに置く。
+            //
+            // ただし1要素のリストは見出しにすると
+            // 子を持たないノードになり、(f)ではなく
+            // fとして出てしまう。
+            let head = match items.first() {
+                Some(Datum::Atom(text))
+                    if items.len() >= 2 =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            };
+            let rest = match &head {
+                Some(text) => {
+                    nodes.push(Node {
+                        text: text.clone(),
+                        depth,
+                    });
+                    &items[1..]
+                }
+                None => {
+                    nodes.push(Node {
+                        text: String::new(),
+                        depth,
+                    });
+                    &items[..]
+                }
+            };
+            for item in rest {
+                emit(item, depth + 1, nodes);
+            }
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -145,11 +224,83 @@ impl App {
                 }
             }
             "q!" => self.quit = true,
+            "e" => {
+                self.edit(argument);
+            }
+            "e!" => {
+                self.modified = false;
+                self.edit(argument);
+            }
             _ => {
                 self.message =
                     format!("不明なコマンドです: {}", name)
             }
         }
+    }
+
+    /// ファイルを読む。読めたらtrueを返す。
+    fn edit(&mut self, argument: Option<&str>) -> bool {
+        if self.modified {
+            self.message =
+                "変更が保存されていません。\
+                 捨てるなら :e! です"
+                    .to_string();
+            return false;
+        }
+
+        if let Some(name) = argument {
+            self.path = Some(PathBuf::from(name));
+        }
+
+        let Some(path) = self.path.clone() else {
+            self.message =
+                "ファイル名がありません".to_string();
+            return false;
+        };
+
+        self.load(&path)
+    }
+
+    fn load(&mut self, path: &Path) -> bool {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.message =
+                    format!("読めません: {}", error);
+                return false;
+            }
+        };
+
+        let reading = match reader::read(&text) {
+            Ok(reading) => reading,
+            Err(error) => {
+                self.message = format!(
+                    "{} を読めません: {}",
+                    path.display(),
+                    error
+                );
+                return false;
+            }
+        };
+
+        self.nodes = nodes_from(&reading.data);
+        self.cursor = 0;
+        self.cursor_col = 0;
+        self.modified = false;
+
+        self.message = if reading.hoisted > 0 {
+            format!(
+                "{} を読みました。\
+                 式の中にあったコメント{}件を\
+                 行頭に出しました",
+                path.display(),
+                reading.hoisted
+            )
+        } else {
+            format!("{} を読みました", path.display())
+        };
+
+        true
     }
 
     /// ファイルに書く。書けたらtrueを返す。
@@ -980,15 +1131,9 @@ fn run(
 ) -> io::Result<()> {
     let mut app = App::new();
 
-    // 読み込みは未対応なので、既存のファイルを
-    // 指定されたときは上書きになると断っておく。
     if let Some(path) = path {
         if path.exists() {
-            app.message = format!(
-                "{} は読み込めません。\
-                 :w すると上書きします",
-                path.display()
-            );
+            app.load(&path);
         }
         app.path = Some(path);
     }
@@ -1379,6 +1524,109 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "x\n"
         );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 読んで印刷し直すと元に戻る。
+    ///
+    /// 印刷側と読み取り側の食い違いはここで出る。
+    fn roundtrip(text: &str) -> String {
+        let reading = reader::read(text).unwrap();
+        let mut app = App::new();
+        app.nodes = nodes_from(&reading.data);
+        app.to_scheme()
+    }
+
+    fn assert_stable(text: &str) {
+        assert_eq!(roundtrip(text), text, "\n1回目");
+        // 2回目以降変わらないこと。
+        assert_eq!(
+            roundtrip(&roundtrip(text)),
+            text,
+            "\n2回目"
+        );
+    }
+
+    /// 印刷したものを読み戻すと同じになる。
+    #[test]
+    fn read_back() {
+        for text in [
+            "x",
+            "()",
+            "(f a)",
+            "(f ())",
+            "(f)",
+            "(a . b)",
+            "(f a . rest)",
+            "'(a b)",
+            "`(a ,b)",
+            ",@(a b)",
+            "#(1 2)",
+            "#u8(1 2)",
+            "#;(a b)",
+            "#0=(a b)",
+            "`(a `(b ,c))",
+            "('a b)",
+            "(list #t #f #\\a)",
+            "\"日本語\"",
+            "(f \"a b\" |c d|)",
+            "(define (square x)\n  (* x x))",
+            "(cond ((< x 2) 1)\n      ((> x 2) -1))",
+            "(let ((x 1) (y 2))\n  body)",
+            "(let loop ((i 0))\n  body)",
+            "(do ((i 0)) ((= i 5))\n  body)",
+            "(case x\n  ((1 2) 'a)\n  (else 'b))",
+            "(when a\n  b\n  c)",
+            "(begin\n  a\n  b)",
+            "(lambda (x)\n  (* x x))",
+            "(and a b)",
+            "a\n\nb",
+            "; head\n\n(define a\n  1)",
+        ] {
+            assert_stable(text);
+        }
+    }
+
+    /// 式の中のコメントは行頭に出る。
+    #[test]
+    fn hoisted_comments() {
+        let reading =
+            reader::read("(a ; note\n b)").unwrap();
+        assert_eq!(reading.hoisted, 1);
+        let mut app = App::new();
+        app.nodes = nodes_from(&reading.data);
+        assert_eq!(app.to_scheme(), "; note\n\n(a b)");
+    }
+
+    /// :e でファイルを読む。
+    #[test]
+    fn edit_command() {
+        let path = std::env::temp_dir()
+            .join("gauche-tree-edit.scm");
+        let name = path.display().to_string();
+        fs::write(&path, "(define (f x)\n  (+ x 1))\n")
+            .unwrap();
+        let mut app = App::new();
+        press(&mut app, &format!(":e {}\n", name));
+        assert_eq!(
+            app.to_scheme(),
+            "(define (f x)\n  (+ x 1))"
+        );
+        assert!(!app.modified);
+        assert_eq!(app.path, Some(path.clone()));
+        // 未保存の変更があると断る。
+        press(&mut app, "ib\x1b:e\n");
+        assert!(app.message.contains(":e!"));
+        // :e! なら捨てて読み直す。
+        press(&mut app, ":e!\n");
+        assert_eq!(
+            app.to_scheme(),
+            "(define (f x)\n  (+ x 1))"
+        );
+        // 壊れたファイルは読まない。
+        fs::write(&path, "(a").unwrap();
+        press(&mut app, ":e!\n");
+        assert!(app.message.contains("括弧が閉じていません"));
         let _ = fs::remove_file(&path);
     }
 }
