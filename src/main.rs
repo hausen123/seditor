@@ -1473,7 +1473,7 @@ mod tests {
     #[test]
     fn commands() {
         let path = std::env::temp_dir()
-            .join("gauche-tree-commands.scm");
+            .join("seditor-commands.scm");
         let _ = fs::remove_file(&path);
         let name = path.display().to_string();
         // 編集するとmodifiedが立つ。
@@ -1602,7 +1602,7 @@ mod tests {
     #[test]
     fn edit_command() {
         let path = std::env::temp_dir()
-            .join("gauche-tree-edit.scm");
+            .join("seditor-edit.scm");
         let name = path.display().to_string();
         fs::write(&path, "(define (f x)\n  (+ x 1))\n")
             .unwrap();

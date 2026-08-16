@@ -1,7 +1,12 @@
 [package]
-name = "gauche-tree"
+name = "seditor"
 version = "0.1.0"
 edition = "2024"
+description = "S-expression editor"
+
+[[bin]]
+name = "sedit"
+path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29"
