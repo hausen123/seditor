@@ -30,7 +30,7 @@ use ratatui::{
 const WIDTH: usize = 80;
 
 /// 子を並べる位置の決め方。
-enum Style {
+enum Indent {
     /// 先頭のn個を見出し行に残し、残りを+2桁に置く。
     Body(usize),
     /// 子を第1子の桁に揃える。
@@ -63,11 +63,20 @@ struct Node {
     depth: usize,
 }
 
+#[derive(PartialEq)]
+enum Mode {
+    Normal,
+    Insert,
+}
+
 struct App {
     nodes: Vec<Node>,
     cursor: usize,
     cursor_col: usize,
     source_mode: bool,
+    mode: Mode,
+    /// dd や >> の1打鍵目。
+    pending: Option<char>,
 }
 
 impl App {
@@ -82,6 +91,46 @@ impl App {
             cursor: 0,
             cursor_col: 0,
             source_mode: false,
+            mode: Mode::Normal,
+            pending: None,
+        }
+    }
+
+    /// カーソルのあるノードのテキスト。
+    fn text(&self) -> &str {
+        &self.nodes[self.cursor].text
+    }
+
+    fn move_to(&mut self, index: usize) {
+        self.cursor = index.min(self.nodes.len() - 1);
+        self.cursor_col =
+            self.cursor_col.min(self.text().len());
+    }
+
+    /// カーソルの1つ上に同じ深さの空ノードを作る。
+    fn open_above(&mut self) {
+        let depth = self.nodes[self.cursor].depth;
+        self.nodes.insert(
+            self.cursor,
+            Node {
+                text: String::new(),
+                depth,
+            },
+        );
+        self.cursor_col = 0;
+    }
+
+    /// カーソル位置の1文字を消す。
+    fn delete_char(&mut self) {
+        let column = self.cursor_col;
+        let node = &mut self.nodes[self.cursor];
+        if column >= node.text.len() {
+            return;
+        }
+        if let Some(c) = node.text[column..].chars().next()
+        {
+            node.text
+                .drain(column..column + c.len_utf8());
         }
     }
 
@@ -204,6 +253,10 @@ impl App {
         }
     }
 
+    /// カーソルのノードを消し、その子孫を1段持ち上げる。
+    ///
+    /// 子を残したまま親だけ消すと深さが飛び、
+    /// children()に拾われず出力から消えてしまう。
     fn delete_node(&mut self) {
         if self.nodes.len() == 1 {
             self.nodes[0].text.clear();
@@ -211,16 +264,20 @@ impl App {
             self.cursor_col = 0;
             return;
         }
-
+        let depth = self.nodes[self.cursor].depth;
         self.nodes.remove(self.cursor);
-
+        let mut i = self.cursor;
+        while i < self.nodes.len()
+            && self.nodes[i].depth > depth
+        {
+            self.nodes[i].depth -= 1;
+            i += 1;
+        }
         if self.cursor >= self.nodes.len() {
             self.cursor = self.nodes.len() - 1;
         }
-
-        self.cursor_col = self.cursor_col.min(
-            self.nodes[self.cursor].text.len()
-        );
+        self.cursor_col =
+            self.cursor_col.min(self.text().len());
     }
 
     // ------------------------------------------------------------
@@ -233,27 +290,61 @@ impl App {
         for index in 0..self.nodes.len() {
             let prefix = self.tree_prefix(index);
 
-            let cursor = if index == self.cursor {
-                "▌"
-            } else {
-                ""
-            };
+            let text = &self.nodes[index].text;
 
-            let text = if self.nodes[index].text.is_empty() {
+            let display = if text.is_empty() {
                 "◦"
             } else {
-                &self.nodes[index].text
+                text
             };
 
-            lines.push(format!(
-                "{}{}{}",
-                prefix,
-                text,
-                cursor
-            ));
+            lines.push(format!("{}{}", prefix, display));
         }
 
         lines
+    }
+
+    /// 描画用の行。カーソルの1セルを反転させる。
+    ///
+    /// 記号を挿し込むと桁がずれるので、
+    /// 文字数を変えずに見せる。
+    fn tree_display(&self) -> Vec<Line<'static>> {
+        let highlight = Style::default()
+            .add_modifier(Modifier::REVERSED);
+
+        self.tree_lines()
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if index != self.cursor {
+                    return Line::from(line);
+                }
+                // 空ノードは◦の上にカーソルを置く。
+                let text = &self.nodes[index].text;
+                let column = if text.is_empty() {
+                    0
+                } else {
+                    self.cursor_col
+                };
+                let split =
+                    self.tree_prefix(index).len() + column;
+                let (left, rest) = line.split_at(split);
+                let mut chars = rest.chars();
+                // 行末より右にいるときは空白を反転させる。
+                let (cell, right) = match chars.next() {
+                    Some(c) => (
+                        c.to_string(),
+                        chars.as_str().to_string(),
+                    ),
+                    None => (" ".to_string(), String::new()),
+                };
+                Line::from(vec![
+                    Span::raw(left.to_string()),
+                    Span::styled(cell, highlight),
+                    Span::raw(right),
+                ])
+            })
+            .collect()
     }
 
     fn tree_prefix(&self, index: usize) -> String {
@@ -430,7 +521,7 @@ impl App {
         format!("({})", parts.join(" "))
     }
 
-    fn style(&self, index: usize) -> Style {
+    fn indent_style(&self, index: usize) -> Indent {
         let text = self.nodes[index].text.trim();
         // 名前付きlet (let loop ((i 0)) ...) は
         // 名前と束縛リストの2つを見出し行に置く。
@@ -446,15 +537,15 @@ impl App {
                         && self.children(child).is_empty()
                 })
         {
-            return Style::Body(2);
+            return Indent::Body(2);
         }
         match text {
             "define" | "lambda" | "let" | "let*"
             | "letrec" | "letrec*" | "when"
-            | "unless" | "case" => Style::Body(1),
-            "do" => Style::Body(2),
-            "begin" => Style::Body(0),
-            _ => Style::Align,
+            | "unless" | "case" => Indent::Body(1),
+            "do" => Indent::Body(2),
+            "begin" => Indent::Body(0),
+            _ => Indent::Align,
         }
     }
 
@@ -488,8 +579,8 @@ impl App {
         if !text.is_empty() {
             output.push_str(text);
         }
-        match self.style(index) {
-            Style::Body(count) => {
+        match self.indent_style(index) {
+            Indent::Body(count) => {
                 let count = count.min(children.len());
                 for &child in &children[..count] {
                     output.push(' ');
@@ -501,7 +592,7 @@ impl App {
                     output,
                 );
             }
-            Style::Align => {
+            Indent::Align => {
                 if !text.is_empty() {
                     output.push(' ');
                 }
@@ -546,56 +637,103 @@ impl App {
             return false;
         }
 
-        match key.code {
-            KeyCode::F(2) => {
-                self.source_mode =
-                    !self.source_mode;
-            }
+        if self.handle_common(key.code) {
+            return true;
+        }
 
-            KeyCode::Tab => {
-                self.indent();
+        match self.mode {
+            Mode::Normal => {
+                self.handle_normal(key.code)
             }
-
-            KeyCode::BackTab => {
-                self.unindent();
+            Mode::Insert => {
+                self.handle_insert(key.code)
             }
-
-            KeyCode::Enter => {
-                self.enter();
-            }
-
-            KeyCode::Backspace => {
-                self.backspace();
-            }
-
-            KeyCode::Delete => {
-                self.delete_node();
-            }
-
-            KeyCode::Up => {
-                self.move_up();
-            }
-
-            KeyCode::Down => {
-                self.move_down();
-            }
-
-            KeyCode::Left => {
-                self.move_left();
-            }
-
-            KeyCode::Right => {
-                self.move_right();
-            }
-
-            KeyCode::Char(c) => {
-                self.insert_char(c);
-            }
-
-            _ => {}
         }
 
         true
+    }
+
+    /// モードによらない操作。処理したらtrueを返す。
+    fn handle_common(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::F(2) => {
+                self.source_mode = !self.source_mode
+            }
+            KeyCode::Up => self.move_up(),
+            KeyCode::Down => self.move_down(),
+            KeyCode::Left => self.move_left(),
+            KeyCode::Right => self.move_right(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_normal(&mut self, code: KeyCode) {
+        let KeyCode::Char(c) = code else {
+            if code == KeyCode::Esc {
+                self.pending = None;
+            }
+            return;
+        };
+        // dd や >> のような2打鍵の命令。
+        if let Some(first) = self.pending.take() {
+            match (first, c) {
+                ('d', 'd') => self.delete_node(),
+                ('>', '>') => self.indent(),
+                ('<', '<') => self.unindent(),
+                ('g', 'g') => self.move_to(0),
+                _ => {}
+            }
+            return;
+        }
+        match c {
+            'i' => self.mode = Mode::Insert,
+            'a' => {
+                self.move_right();
+                self.mode = Mode::Insert;
+            }
+            'I' => {
+                self.cursor_col = 0;
+                self.mode = Mode::Insert;
+            }
+            'A' => {
+                self.cursor_col = self.text().len();
+                self.mode = Mode::Insert;
+            }
+            'o' => {
+                self.enter();
+                self.mode = Mode::Insert;
+            }
+            'O' => {
+                self.open_above();
+                self.mode = Mode::Insert;
+            }
+            'x' => self.delete_char(),
+            'h' => self.move_left(),
+            'j' => self.move_down(),
+            'k' => self.move_up(),
+            'l' => self.move_right(),
+            '0' => self.cursor_col = 0,
+            '$' => self.cursor_col = self.text().len(),
+            'G' => self.move_to(self.nodes.len() - 1),
+            'd' | '>' | '<' | 'g' => {
+                self.pending = Some(c)
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_insert(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Tab => self.indent(),
+            KeyCode::BackTab => self.unindent(),
+            KeyCode::Enter => self.enter(),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete_char(),
+            KeyCode::Char(c) => self.insert_char(c),
+            _ => {}
+        }
     }
 }
 
@@ -609,16 +747,18 @@ fn draw(
 ) {
     let area = frame.area();
 
-    let text = if app.source_mode {
-        app.to_scheme()
+    let text: Text = if app.source_mode {
+        app.to_scheme().into()
     } else {
-        app.tree_lines().join("\n")
+        app.tree_display().into()
     };
 
     let title = if app.source_mode {
         " Gauche Tree - Scheme "
+    } else if app.mode == Mode::Normal {
+        " Gauche Tree - NORMAL "
     } else {
-        " Gauche Tree "
+        " Gauche Tree - INSERT "
     };
 
     let paragraph = Paragraph::new(text)
@@ -709,13 +849,16 @@ mod tests {
 
     /// キー列をhandle_keyに流し込み、TUIと同じ経路を辿る。
     ///
-    /// `\t` はTab、`\n` はEnter、`\x08` はShift-Tab。
+    /// `\t` はTab、`\n` はEnter、`\x08` はShift-Tab、
+    /// `\x1b` はEsc、`\x7f` はBackspace。
     fn press(app: &mut App, keys: &str) {
         for key in keys.chars() {
             let code = match key {
                 '\t' => KeyCode::Tab,
                 '\n' => KeyCode::Enter,
                 '\x08' => KeyCode::BackTab,
+                '\x1b' => KeyCode::Esc,
+                '\x7f' => KeyCode::Backspace,
                 _ => KeyCode::Char(key),
             };
             app.handle_key(KeyEvent::new(
@@ -725,18 +868,22 @@ mod tests {
         }
     }
 
+    /// Normalモードで始まるので、iを打ってから流す。
+    fn insert(keys: &str) -> App {
+        let mut app = App::new();
+        press(&mut app, "i");
+        press(&mut app, keys);
+        app
+    }
+
     /// キー列を打ってからF2の出力を得る。
     fn scheme(keys: &str) -> String {
-        let mut app = App::new();
-        press(&mut app, keys);
-        app.to_scheme()
+        insert(keys).to_scheme()
     }
 
     /// キー列を打ってからカーソル表示を除いた木を得る。
     fn tree(keys: &str) -> String {
-        let mut app = App::new();
-        press(&mut app, keys);
-        app.tree_lines().join("\n").replace('▌', "")
+        insert(keys).tree_lines().join("\n")
     }
 
     fn check(cases: &[(&str, &str)]) {
@@ -914,5 +1061,89 @@ mod tests {
              │       └── 2\n\
              └── body"
         );
+    }
+
+    /// Normalモードの操作。
+    #[test]
+    fn normal_mode() {
+        // Escで抜けてから打った文字は命令として効く。
+        // ddはノードだけ消して子を持ち上げる。
+        let mut app = insert("f\n\ta\n\tb");
+        press(&mut app, "\x1b");
+        press(&mut app, "kkdd");
+        assert_eq!(app.to_scheme(), "(a b)");
+        // >> と << で階層を変える。
+        let mut app = insert("f\na");
+        press(&mut app, "\x1b>>");
+        assert_eq!(app.to_scheme(), "(f a)");
+        press(&mut app, "<<");
+        assert_eq!(app.to_scheme(), "f\n\na");
+        // o は下に、O は上に空ノードを作って挿入モードへ。
+        let mut app = insert("a");
+        press(&mut app, "\x1bob");
+        assert_eq!(app.to_scheme(), "a\n\nb");
+        let mut app = insert("a");
+        press(&mut app, "\x1bOb");
+        assert_eq!(app.to_scheme(), "b\n\na");
+        // x は1文字消す。0 と $ は行頭と行末。
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0x");
+        assert_eq!(app.to_scheme(), "bc");
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0$icut-");
+        assert_eq!(app.to_scheme(), "abccut-");
+        // gg と G で先頭と末尾へ。
+        let mut app = insert("a\nb\nc");
+        press(&mut app, "\x1bggIX");
+        assert_eq!(app.to_scheme(), "Xa\n\nb\n\nc");
+        press(&mut app, "\x1bGA!");
+        assert_eq!(app.to_scheme(), "Xa\n\nb\n\nc!");
+    }
+
+    /// カーソルは反転セルで示す。桁はずれない。
+    #[test]
+    fn cursor_cell() {
+        // 反転しているセルの中身。
+        fn cell(app: &App) -> String {
+            app.tree_display()[app.cursor].spans[1]
+                .content
+                .to_string()
+        }
+        // 行の中身は反転の有無で変わらない。
+        fn line(app: &App) -> String {
+            app.tree_display()[app.cursor]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        }
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0");
+        assert_eq!(cell(&app), "a");
+        assert_eq!(line(&app), "abc");
+        press(&mut app, "l");
+        assert_eq!(cell(&app), "b");
+        assert_eq!(line(&app), "abc");
+        // 行末より右では空白を反転する。
+        press(&mut app, "$");
+        assert_eq!(cell(&app), " ");
+        assert_eq!(line(&app), "abc ");
+        // 空ノードは◦の上。
+        let app = App::new();
+        assert_eq!(cell(&app), "◦");
+        assert_eq!(line(&app), "◦");
+    }
+
+    /// 多バイト文字。列はバイト位置で持っている。
+    #[test]
+    fn multibyte() {
+        let mut app = insert("\"日本語\"");
+        assert_eq!(app.to_scheme(), "\"日本語\"");
+        // hで閉じ引用符と語を戻り、xで語を消す。
+        press(&mut app, "\x1bhhx");
+        assert_eq!(app.to_scheme(), "\"日本\"");
+        // 挿入モードのBackspaceも1文字単位。
+        press(&mut app, "i\x7f");
+        assert_eq!(app.to_scheme(), "\"日\"");
     }
 }
