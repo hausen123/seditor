@@ -14,6 +14,7 @@ use crossterm::{
         Event,
         KeyCode,
         KeyEvent,
+        KeyEventKind,
         KeyModifiers,
     },
     execute,
@@ -203,6 +204,14 @@ struct App {
     register: Vec<Node>,
     /// 数字を溜めた回数指定。
     count: Option<usize>,
+    /// 画面最上部の行番号。
+    scroll: usize,
+    /// ソース表示のスクロール位置。
+    source_scroll: usize,
+    /// 枠の内側の行数。描画時に入る。
+    height: usize,
+    /// ソース表示の行数。描画時に入る。
+    source_lines: usize,
     /// 編集の区切りで取った控え。
     ///
     /// 実際に変更が起きるまでundoには積まない。
@@ -233,8 +242,93 @@ impl App {
             redo: Vec::new(),
             register: Vec::new(),
             count: None,
+            scroll: 0,
+            source_scroll: 0,
+            height: 0,
+            source_lines: 0,
             held: None,
         }
+    }
+
+    // ------------------------------------------------------------
+    // スクロール
+    // ------------------------------------------------------------
+
+    /// カーソルが画面に入るよう最小限だけ動かす。
+    ///
+    /// 見えている間は動かさない。
+    fn follow_cursor(&mut self) {
+        if self.height == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + self.height
+        {
+            self.scroll =
+                self.cursor - self.height + 1;
+        }
+    }
+
+    /// 画面をlines行送る。
+    ///
+    /// カーソルを動かすだけではfollow_cursorが
+    /// 最小限しか送らないので、scrollも直接動かす。
+    /// 両方を同じだけ動かすと画面上の行が変わらない。
+    fn scroll_page(&mut self, lines: isize) {
+        if self.source_mode {
+            self.scroll_by(lines);
+            return;
+        }
+
+        let last_scroll = self
+            .nodes
+            .len()
+            .saturating_sub(self.height);
+
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(lines)
+            .min(last_scroll);
+
+        let last = self.nodes.len() - 1;
+
+        self.cursor = self
+            .cursor
+            .saturating_add_signed(lines)
+            .min(last);
+
+        // scrollが端で止まったときは画面内に戻す。
+        let bottom = (self.scroll + self.height)
+            .saturating_sub(1)
+            .min(last);
+
+        self.cursor =
+            self.cursor.clamp(self.scroll, bottom);
+
+        self.cursor_col =
+            self.cursor_col.min(self.text().len());
+    }
+
+    /// カーソルまたは画面をlines行動かす。
+    fn scroll_by(&mut self, lines: isize) {
+        if self.source_mode {
+            let last = self
+                .source_lines
+                .saturating_sub(self.height);
+            self.source_scroll = self
+                .source_scroll
+                .saturating_add_signed(lines)
+                .min(last);
+            return;
+        }
+        let last = self.nodes.len() - 1;
+        self.cursor = self
+            .cursor
+            .saturating_add_signed(lines)
+            .min(last);
+        self.cursor_col =
+            self.cursor_col.min(self.text().len());
     }
 
     // ------------------------------------------------------------
@@ -1176,10 +1270,17 @@ impl App {
 
     /// モードによらない操作。処理したらtrueを返す。
     fn handle_common(&mut self, code: KeyCode) -> bool {
+        // 1画面送りは2行重ねる。
+        let page =
+            self.height.saturating_sub(2).max(1) as isize;
         match code {
             KeyCode::F(2) => {
                 self.source_mode = !self.source_mode
             }
+            // tmuxがCtrl-Bをプレフィックスに使うので、
+            // 素通りするキーも用意しておく。
+            KeyCode::PageDown => self.scroll_page(page),
+            KeyCode::PageUp => self.scroll_page(-page),
             KeyCode::Up => self.move_up(),
             KeyCode::Down => self.move_down(),
             KeyCode::Left => self.move_left(),
@@ -1194,8 +1295,27 @@ impl App {
             .modifiers
             .contains(KeyModifiers::CONTROL)
         {
-            if key.code == KeyCode::Char('r') {
-                self.redo();
+            // vimと同じく1画面送りは2行重ねる。
+            let page = self
+                .height
+                .saturating_sub(2)
+                .max(1) as isize;
+            let half = (self.height / 2).max(1) as isize;
+            match key.code {
+                KeyCode::Char('r') => self.redo(),
+                KeyCode::Char('f') => {
+                    self.scroll_page(page)
+                }
+                KeyCode::Char('b') => {
+                    self.scroll_page(-page)
+                }
+                KeyCode::Char('d') => {
+                    self.scroll_page(half)
+                }
+                KeyCode::Char('u') => {
+                    self.scroll_page(-half)
+                }
+                _ => {}
             }
             return;
         }
@@ -1304,16 +1424,10 @@ impl App {
                     self.move_left();
                 }
             }
-            'j' => {
-                for _ in 0..count {
-                    self.move_down();
-                }
-            }
-            'k' => {
-                for _ in 0..count {
-                    self.move_up();
-                }
-            }
+            // scroll_byはソース表示なら画面を、
+            // 木の表示ならカーソルを動かす。
+            'j' => self.scroll_by(count as isize),
+            'k' => self.scroll_by(-(count as isize)),
             'l' => {
                 for _ in 0..count {
                     self.move_right();
@@ -1358,7 +1472,7 @@ impl App {
 
 fn draw(
     frame: &mut Frame,
-    app: &App,
+    app: &mut App,
 ) {
     // 下1行をコマンドとメッセージに使う。
     let areas = Layout::vertical([
@@ -1367,13 +1481,33 @@ fn draw(
     ])
     .split(frame.area());
 
+    // 枠の上下を除いた行数。
+    // 画面の高さは描画時にしか分からない。
+    app.height =
+        areas[0].height.saturating_sub(2) as usize;
+
     let text: Text = if app.source_mode {
-        app.to_scheme().into()
+        let source = app.to_scheme();
+        app.source_lines = source.lines().count();
+        // 短くなっていれば行き過ぎを戻す。
+        app.source_scroll = app.source_scroll.min(
+            app.source_lines
+                .saturating_sub(app.height),
+        );
+        source.into()
     } else {
+        app.follow_cursor();
         app.tree_display().into()
     };
 
+    let scroll = if app.source_mode {
+        app.source_scroll
+    } else {
+        app.scroll
+    };
+
     let paragraph = Paragraph::new(text)
+        .scroll((scroll as u16, 0))
         .block(
             Block::default()
                 .title(title(app))
@@ -1472,15 +1606,18 @@ fn run(
 
     loop {
         terminal.draw(|frame| {
-            draw(frame, &app);
+            draw(frame, &mut app);
         })?;
 
         if event::poll(
             Duration::from_millis(50)
         )? {
-            if let Event::Key(key) =
-                event::read()?
-            {
+            if let Event::Key(key) = event::read()? {
+                // 離したときのイベントを送る端末が
+                // あるので、押した分だけ処理する。
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 if !app.handle_key(key) {
                     break;
                 }
@@ -2199,5 +2336,203 @@ mod tests {
         // 消したぶんはレジスタに入る。
         press(&mut app, "p");
         assert_eq!(app.to_scheme(), "(a d (b c))");
+    }
+
+    /// スクロールとページ送り。
+    #[test]
+    fn scrolling() {
+        // 20ノードを高さ5の画面で見る。
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..20 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1b");
+        assert_eq!(app.nodes.len(), 20);
+        app.height = 5;
+        // 見えている間は動かない。
+        app.cursor = 0;
+        app.follow_cursor();
+        assert_eq!(app.scroll, 0);
+        app.cursor = 4;
+        app.follow_cursor();
+        assert_eq!(app.scroll, 0);
+        // 下に外れたら最小限だけ送る。
+        app.cursor = 5;
+        app.follow_cursor();
+        assert_eq!(app.scroll, 1);
+        // 上に外れたらその行を最上部に。
+        app.cursor = 0;
+        app.follow_cursor();
+        assert_eq!(app.scroll, 0);
+        // Ctrl-F は1画面分、Ctrl-D は半画面分。
+        let page = |app: &mut App, c: char| {
+            app.handle_key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL,
+            ));
+        };
+        // 高さ5なら1画面は3行（2行重ねる）、
+        // 半画面は2行。画面もカーソルも同じだけ動く。
+        page(&mut app, 'f');
+        assert_eq!((app.scroll, app.cursor), (3, 3));
+        page(&mut app, 'd');
+        assert_eq!((app.scroll, app.cursor), (5, 5));
+        page(&mut app, 'b');
+        assert_eq!((app.scroll, app.cursor), (2, 2));
+        page(&mut app, 'u');
+        assert_eq!((app.scroll, app.cursor), (0, 0));
+        // 端では止まる。
+        page(&mut app, 'b');
+        assert_eq!(app.cursor, 0);
+        for _ in 0..10 {
+            page(&mut app, 'f');
+        }
+        assert_eq!(app.cursor, 19);
+        // ソース表示では画面だけ動く。
+        app.source_mode = true;
+        app.source_lines = 40;
+        let before = app.cursor;
+        page(&mut app, 'f');
+        assert_eq!(app.source_scroll, 3);
+        assert_eq!(app.cursor, before);
+        page(&mut app, 'b');
+        assert_eq!(app.source_scroll, 0);
+        // 行数を超えて送らない。
+        for _ in 0..20 {
+            page(&mut app, 'f');
+        }
+        assert_eq!(app.source_scroll, 35);
+    }
+
+    /// 実際に描画して画面に見える行を返す。
+    fn screen(
+        terminal: &mut Terminal<
+            ratatui::backend::TestBackend,
+        >,
+        app: &mut App,
+    ) -> Vec<String> {
+        terminal
+            .draw(|frame| draw(frame, app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut lines = Vec::new();
+        for y in 1..buffer.area.height - 1 {
+            let mut line = String::new();
+            for x in 1..buffer.area.width - 1 {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            let line = line.trim_end().to_string();
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
+    /// 実際に描画してページ送りを確かめる。
+    ///
+    /// heightを手で設定するテストでは描画経路を
+    /// 通らないので、画面に見える内容で確かめる。
+    #[test]
+    fn paging_on_screen() {
+        // 高さ10。枠2行と下1行を引いて7行見える。
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..20 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1bgg");
+        let ctrl = |app: &mut App, c: char| {
+            app.handle_key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::CONTROL,
+            ));
+        };
+        let top = |t: &mut Terminal<_>, app: &mut App| {
+            screen(t, app)[0].clone()
+        };
+        assert_eq!(top(&mut terminal, &mut app), "0");
+        assert_eq!(app.height, 7);
+        // 最上部では戻れない。
+        ctrl(&mut app, 'b');
+        assert_eq!(top(&mut terminal, &mut app), "0");
+        // 1画面は2行重ねて5行。初回から画面が動く。
+        ctrl(&mut app, 'f');
+        assert_eq!(top(&mut terminal, &mut app), "5");
+        ctrl(&mut app, 'f');
+        assert_eq!(top(&mut terminal, &mut app), "10");
+        ctrl(&mut app, 'b');
+        assert_eq!(top(&mut terminal, &mut app), "5");
+        // 半画面は3行。
+        ctrl(&mut app, 'd');
+        assert_eq!(top(&mut terminal, &mut app), "8");
+        ctrl(&mut app, 'u');
+        assert_eq!(top(&mut terminal, &mut app), "5");
+        // 最下部より先には送らない。
+        for _ in 0..10 {
+            ctrl(&mut app, 'f');
+        }
+        assert_eq!(top(&mut terminal, &mut app), "13");
+        assert_eq!(app.cursor, 19);
+        // jで下端を越えると1行ずつ付いてくる。
+        press(&mut app, "gg");
+        assert_eq!(top(&mut terminal, &mut app), "0");
+        for _ in 0..7 {
+            press(&mut app, "j");
+        }
+        assert_eq!(top(&mut terminal, &mut app), "1");
+        // ソース表示は画面だけ動く。
+        //
+        // source_linesは描画時に入るので、
+        // F2の直後に1度描いてから送る。
+        app.source_mode = true;
+        screen(&mut terminal, &mut app);
+        let before = app.cursor;
+        ctrl(&mut app, 'f');
+        assert_eq!(app.source_scroll, 5);
+        assert_eq!(app.cursor, before);
+    }
+
+    /// PageUp / PageDown。
+    ///
+    /// tmuxがCtrl-Bをプレフィックスに使うため、
+    /// 素通りするキーでも送れる必要がある。
+    #[test]
+    fn page_keys() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..20 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1bgg");
+        let key = |app: &mut App, code: KeyCode| {
+            app.handle_key(KeyEvent::new(
+                code,
+                KeyModifiers::NONE,
+            ));
+        };
+        let top = |t: &mut Terminal<_>, app: &mut App| {
+            screen(t, app)[0].clone()
+        };
+        assert_eq!(top(&mut terminal, &mut app), "0");
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(top(&mut terminal, &mut app), "5");
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(top(&mut terminal, &mut app), "10");
+        key(&mut app, KeyCode::PageUp);
+        assert_eq!(top(&mut terminal, &mut app), "5");
+        // 挿入モードでも効く。
+        press(&mut app, "i");
+        key(&mut app, KeyCode::PageDown);
+        assert_eq!(top(&mut terminal, &mut app), "10");
     }
 }
