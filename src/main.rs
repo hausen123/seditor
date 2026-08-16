@@ -1,4 +1,6 @@
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::{
@@ -67,6 +69,7 @@ struct Node {
 enum Mode {
     Normal,
     Insert,
+    Command,
 }
 
 struct App {
@@ -77,6 +80,13 @@ struct App {
     mode: Mode,
     /// dd や >> の1打鍵目。
     pending: Option<char>,
+    /// :の入力中の文字列。:は含まない。
+    command: String,
+    path: Option<PathBuf>,
+    modified: bool,
+    /// 画面下に出す一言。
+    message: String,
+    quit: bool,
 }
 
 impl App {
@@ -93,6 +103,84 @@ impl App {
             source_mode: false,
             mode: Mode::Normal,
             pending: None,
+            command: String::new(),
+            path: None,
+            modified: false,
+            message: String::new(),
+            quit: false,
+        }
+    }
+
+    // ------------------------------------------------------------
+    // コマンド
+    // ------------------------------------------------------------
+
+    /// :で始まる1行を実行する。
+    fn run_command(&mut self, line: &str) {
+        let mut words = line.split_whitespace();
+
+        let Some(name) = words.next() else {
+            return;
+        };
+
+        let argument = words.next();
+
+        match name {
+            "w" => {
+                self.write(argument);
+            }
+            "wq" | "x" => {
+                if self.write(argument) {
+                    self.quit = true;
+                }
+            }
+            "q" => {
+                if self.modified {
+                    self.message =
+                        "変更が保存されていません。\
+                         捨てるなら :q! です"
+                            .to_string();
+                } else {
+                    self.quit = true;
+                }
+            }
+            "q!" => self.quit = true,
+            _ => {
+                self.message =
+                    format!("不明なコマンドです: {}", name)
+            }
+        }
+    }
+
+    /// ファイルに書く。書けたらtrueを返す。
+    fn write(&mut self, argument: Option<&str>) -> bool {
+        if let Some(name) = argument {
+            self.path = Some(PathBuf::from(name));
+        }
+
+        let Some(path) = self.path.clone() else {
+            self.message =
+                "ファイル名がありません".to_string();
+            return false;
+        };
+
+        let mut text = self.to_scheme();
+        text.push('\n');
+
+        match fs::write(&path, text) {
+            Ok(()) => {
+                self.modified = false;
+                self.message = format!(
+                    "{} に書き込みました",
+                    path.display()
+                );
+                true
+            }
+            Err(error) => {
+                self.message =
+                    format!("書き込めません: {}", error);
+                false
+            }
         }
     }
 
@@ -118,6 +206,7 @@ impl App {
             },
         );
         self.cursor_col = 0;
+        self.modified = true;
     }
 
     /// カーソル位置の1文字を消す。
@@ -131,6 +220,7 @@ impl App {
         {
             node.text
                 .drain(column..column + c.len_utf8());
+            self.modified = true;
         }
     }
 
@@ -139,6 +229,7 @@ impl App {
 
         node.text.insert(self.cursor_col, c);
         self.cursor_col += c.len_utf8();
+        self.modified = true;
     }
 
     fn backspace(&mut self) {
@@ -159,6 +250,7 @@ impl App {
             );
 
             self.cursor_col -= len;
+            self.modified = true;
         }
     }
 
@@ -175,6 +267,7 @@ impl App {
 
         self.cursor += 1;
         self.cursor_col = 0;
+        self.modified = true;
     }
 
     fn indent(&mut self) {
@@ -190,12 +283,14 @@ impl App {
 
         if current_depth < previous_depth + 1 {
             self.nodes[self.cursor].depth += 1;
+            self.modified = true;
         }
     }
 
     fn unindent(&mut self) {
         if self.nodes[self.cursor].depth > 0 {
             self.nodes[self.cursor].depth -= 1;
+            self.modified = true;
         }
     }
 
@@ -262,6 +357,7 @@ impl App {
             self.nodes[0].text.clear();
             self.nodes[0].depth = 0;
             self.cursor_col = 0;
+            self.modified = true;
             return;
         }
         let depth = self.nodes[self.cursor].depth;
@@ -278,6 +374,7 @@ impl App {
         }
         self.cursor_col =
             self.cursor_col.min(self.text().len());
+        self.modified = true;
     }
 
     // ------------------------------------------------------------
@@ -637,6 +734,12 @@ impl App {
             return false;
         }
 
+        // コマンド入力中は矢印もF2も横取りしない。
+        if self.mode == Mode::Command {
+            self.handle_command(key.code);
+            return !self.quit;
+        }
+
         if self.handle_common(key.code) {
             return true;
         }
@@ -648,9 +751,33 @@ impl App {
             Mode::Insert => {
                 self.handle_insert(key.code)
             }
+            Mode::Command => {}
         }
 
-        true
+        !self.quit
+    }
+
+    fn handle_command(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.command.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let line =
+                    std::mem::take(&mut self.command);
+                self.mode = Mode::Normal;
+                self.run_command(&line);
+            }
+            KeyCode::Backspace => {
+                // 空の状態で消すと抜ける。
+                if self.command.pop().is_none() {
+                    self.mode = Mode::Normal;
+                }
+            }
+            KeyCode::Char(c) => self.command.push(c),
+            _ => {}
+        }
     }
 
     /// モードによらない操作。処理したらtrueを返す。
@@ -716,6 +843,11 @@ impl App {
             '0' => self.cursor_col = 0,
             '$' => self.cursor_col = self.text().len(),
             'G' => self.move_to(self.nodes.len() - 1),
+            ':' => {
+                self.command.clear();
+                self.message.clear();
+                self.mode = Mode::Command;
+            }
             'd' | '>' | '<' | 'g' => {
                 self.pending = Some(c)
             }
@@ -745,7 +877,12 @@ fn draw(
     frame: &mut Frame,
     app: &App,
 ) {
-    let area = frame.area();
+    // 下1行をコマンドとメッセージに使う。
+    let areas = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
 
     let text: Text = if app.source_mode {
         app.to_scheme().into()
@@ -753,25 +890,47 @@ fn draw(
         app.tree_display().into()
     };
 
-    let title = if app.source_mode {
-        " Gauche Tree - Scheme "
-    } else if app.mode == Mode::Normal {
-        " Gauche Tree - NORMAL "
-    } else {
-        " Gauche Tree - INSERT "
-    };
-
     let paragraph = Paragraph::new(text)
         .block(
             Block::default()
-                .title(title)
+                .title(title(app))
                 .borders(Borders::ALL),
         );
 
+    frame.render_widget(paragraph, areas[0]);
+
+    let status = if app.mode == Mode::Command {
+        format!(":{}", app.command)
+    } else {
+        app.message.clone()
+    };
+
     frame.render_widget(
-        paragraph,
-        area,
+        Paragraph::new(status),
+        areas[1],
     );
+}
+
+/// ファイル名、変更の有無、モードを並べた見出し。
+fn title(app: &App) -> String {
+    let name = match &app.path {
+        Some(path) => path.display().to_string(),
+        None => "[無名]".to_string(),
+    };
+
+    let mark = if app.modified { " [+]" } else { "" };
+
+    let mode = if app.source_mode {
+        "Scheme"
+    } else {
+        match app.mode {
+            Mode::Normal => "NORMAL",
+            Mode::Insert => "INSERT",
+            Mode::Command => "COMMAND",
+        }
+    };
+
+    format!(" {}{} - {} ", name, mark, mode)
 }
 
 // ------------------------------------------------------------
@@ -794,8 +953,12 @@ fn main() -> io::Result<()> {
     let mut terminal =
         Terminal::new(backend)?;
 
+    let path = std::env::args()
+        .nth(1)
+        .map(PathBuf::from);
+
     let result =
-        run(&mut terminal);
+        run(&mut terminal, path);
 
     disable_raw_mode()?;
 
@@ -813,8 +976,22 @@ fn run(
     terminal: &mut Terminal<
         CrosstermBackend<io::Stdout>
     >,
+    path: Option<PathBuf>,
 ) -> io::Result<()> {
     let mut app = App::new();
+
+    // 読み込みは未対応なので、既存のファイルを
+    // 指定されたときは上書きになると断っておく。
+    if let Some(path) = path {
+        if path.exists() {
+            app.message = format!(
+                "{} は読み込めません。\
+                 :w すると上書きします",
+                path.display()
+            );
+        }
+        app.path = Some(path);
+    }
 
     loop {
         terminal.draw(|frame| {
@@ -1145,5 +1322,63 @@ mod tests {
         // 挿入モードのBackspaceも1文字単位。
         press(&mut app, "i\x7f");
         assert_eq!(app.to_scheme(), "\"日\"");
+    }
+
+    /// :コマンド。
+    #[test]
+    fn commands() {
+        let path = std::env::temp_dir()
+            .join("gauche-tree-commands.scm");
+        let _ = fs::remove_file(&path);
+        let name = path.display().to_string();
+        // 編集するとmodifiedが立つ。
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1b");
+        assert!(app.modified);
+        // ファイル名が無ければ書けない。
+        press(&mut app, ":w\n");
+        assert_eq!(app.message, "ファイル名がありません");
+        assert!(app.modified);
+        // 名前を渡せば書けて、以降は覚えている。
+        press(&mut app, &format!(":w {}\n", name));
+        assert!(!app.modified);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "(f a)\n"
+        );
+        assert_eq!(app.path, Some(path.clone()));
+        // 未保存の変更があると :q は断る。
+        press(&mut app, "ib\x1b");
+        assert!(app.modified);
+        assert!(app.handle_key(KeyEvent::new(
+            KeyCode::Char(':'),
+            KeyModifiers::NONE
+        )));
+        press(&mut app, "q\n");
+        assert!(!app.quit);
+        assert!(app.message.contains(":q!"));
+        // :q! は捨てて終わる。
+        press(&mut app, ":q!\n");
+        assert!(app.quit);
+        // Escで取り消せる。
+        let mut app = insert("a");
+        press(&mut app, "\x1b:q!\x1b");
+        assert!(!app.quit);
+        assert_eq!(app.command, "");
+        // 知らないコマンド。
+        press(&mut app, ":zzz\n");
+        assert_eq!(
+            app.message,
+            "不明なコマンドです: zzz"
+        );
+        // :wq は書いてから終わる。
+        let mut app = insert("x");
+        press(&mut app, &format!("\x1b:wq {}\n", name));
+        assert!(app.quit);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "x\n"
+        );
+        let _ = fs::remove_file(&path);
     }
 }
