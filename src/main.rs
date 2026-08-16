@@ -147,6 +147,26 @@ fn emit(
 /// 積んでおくアンドゥの段数。
 const UNDO_LIMIT: usize = 100;
 
+/// 深さをブロック内の最小に合わせて0からにする。
+///
+/// 先頭を基準にすると、後ろに浅いノードが続く場合に
+/// 負になってしまう。
+fn normalize(nodes: &[Node]) -> Vec<Node> {
+    let base = nodes
+        .iter()
+        .map(|node| node.depth)
+        .min()
+        .unwrap_or(0);
+
+    nodes
+        .iter()
+        .map(|node| Node {
+            text: node.text.clone(),
+            depth: node.depth - base,
+        })
+        .collect()
+}
+
 /// 巻き戻すために丸ごと控えておく状態。
 #[derive(Clone)]
 struct Snapshot {
@@ -179,6 +199,10 @@ struct App {
     quit: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// ヤンクした内容。深さは0からの相対値。
+    register: Vec<Node>,
+    /// 数字を溜めた回数指定。
+    count: Option<usize>,
     /// 編集の区切りで取った控え。
     ///
     /// 実際に変更が起きるまでundoには積まない。
@@ -207,6 +231,8 @@ impl App {
             quit: false,
             undo: Vec::new(),
             redo: Vec::new(),
+            register: Vec::new(),
+            count: None,
             held: None,
         }
     }
@@ -462,7 +488,7 @@ impl App {
     /// ノードごと消して子を1段持ち上げる。
     fn delete_char(&mut self) {
         if self.text().is_empty() {
-            self.delete_node();
+            self.delete_node(1);
             return;
         }
 
@@ -494,7 +520,7 @@ impl App {
     fn backspace(&mut self) {
         if self.text().is_empty() {
             if self.cursor == 0 {
-                self.delete_node();
+                self.delete_node(1);
                 self.cursor_col = 0;
                 return;
             }
@@ -504,7 +530,7 @@ impl App {
             // 位置から前のノードを決めておく。
             let previous = self.cursor - 1;
 
-            self.delete_node();
+            self.delete_node(1);
 
             self.cursor = previous;
             self.cursor_col = self.text().len();
@@ -627,32 +653,123 @@ impl App {
         }
     }
 
-    /// カーソルのノードを消し、その子孫を1段持ち上げる。
+    /// 深さの不変条件を復元する。
     ///
-    /// 子を残したまま親だけ消すと深さが飛び、
-    /// children()に拾われず出力から消えてしまう。
-    fn delete_node(&mut self) {
-        if self.nodes.len() == 1 {
-            self.nodes[0].text.clear();
-            self.nodes[0].depth = 0;
-            self.cursor_col = 0;
-            self.record();
-            return;
+    /// 各ノードの深さは1つ前のノード + 1 を超えない。
+    /// 超えたノードはchildren()に拾われず、
+    /// 出力から黙って消えてしまう。
+    ///
+    /// 1ノードの削除に当てると「子を1段持ち上げる」に
+    /// なり、複数まとめて消したときの穴も同じ規則で
+    /// 塞がる。
+    fn repair(&mut self) {
+        for i in 0..self.nodes.len() {
+            let limit = if i == 0 {
+                0
+            } else {
+                self.nodes[i - 1].depth + 1
+            };
+            if self.nodes[i].depth > limit {
+                self.nodes[i].depth = limit;
+            }
         }
-        let depth = self.nodes[self.cursor].depth;
-        self.nodes.remove(self.cursor);
-        let mut i = self.cursor;
-        while i < self.nodes.len()
-            && self.nodes[i].depth > depth
-        {
-            self.nodes[i].depth -= 1;
-            i += 1;
+    }
+
+    /// カーソルから count 個のノードを消す。
+    ///
+    /// 消したぶんはレジスタに入る。子は
+    /// 深さの復元によって持ち上がる。
+    fn delete_node(&mut self, count: usize) {
+        let end = (self.cursor + count)
+            .min(self.nodes.len());
+
+        self.register =
+            normalize(&self.nodes[self.cursor..end]);
+
+        self.nodes.drain(self.cursor..end);
+
+        if self.nodes.is_empty() {
+            self.nodes.push(Node {
+                text: String::new(),
+                depth: 0,
+            });
         }
+
         if self.cursor >= self.nodes.len() {
             self.cursor = self.nodes.len() - 1;
         }
+
+        self.repair();
+
         self.cursor_col =
             self.cursor_col.min(self.text().len());
+        self.record();
+    }
+
+    /// カーソルから count 個のノードをヤンクする。
+    fn yank(&mut self, count: usize) {
+        let end = (self.cursor + count)
+            .min(self.nodes.len());
+
+        self.register =
+            normalize(&self.nodes[self.cursor..end]);
+
+        self.message = format!(
+            "{}ノードをヤンクしました",
+            self.register.len()
+        );
+    }
+
+    /// レジスタの内容を貼る。
+    ///
+    /// 根をカーソルと同じ深さに置くので、
+    /// 深さが飛ぶことはない。
+    fn paste(&mut self, before: bool, count: usize) {
+        if self.register.is_empty() {
+            self.message =
+                "何もヤンクしていません".to_string();
+            return;
+        }
+
+        // 必ず次の行に、カーソルと同じ深さで入れる。
+        //
+        // 平坦な深さのリストでは「すぐ次の行」
+        // 「同じ深さ」「子を奪わない」は両立しない。
+        // 続く深い行は貼ったノードのものになる。
+        let depth = self.nodes[self.cursor].depth;
+
+        // 中身も子も無い ◦ は空の置き場なので、
+        // 下に足さずその場を明け渡す。
+        let replace = self.text().is_empty()
+            && self.children(self.cursor).is_empty();
+
+        let at = if replace || before {
+            self.cursor
+        } else {
+            self.cursor + 1
+        };
+
+        let mut block = Vec::new();
+
+        for _ in 0..count {
+            for node in &self.register {
+                block.push(Node {
+                    text: node.text.clone(),
+                    depth: node.depth + depth,
+                });
+            }
+        }
+
+        let length = block.len();
+
+        self.nodes.splice(at..at, block);
+
+        if replace {
+            self.nodes.remove(at + length);
+        }
+
+        self.cursor = at;
+        self.cursor_col = 0;
         self.record();
     }
 
@@ -1086,16 +1203,44 @@ impl App {
         let KeyCode::Char(c) = key.code else {
             if key.code == KeyCode::Esc {
                 self.pending = None;
+                self.count = None;
             }
             return;
         };
+        // 数字は回数として溜める。
+        //
+        // 0は溜まっているときだけ桁として扱う。
+        // そうでなければ行頭移動。
+        if self.pending.is_none()
+            && c.is_ascii_digit()
+            && (c != '0' || self.count.is_some())
+        {
+            let digit = c.to_digit(10).unwrap() as usize;
+            self.count = Some(
+                self.count.unwrap_or(0) * 10 + digit,
+            );
+            return;
+        }
+        // 2打鍵の1打鍵目。
+        //
+        // ここで回数を取り出すと 3yy の 3 が
+        // y に食われてしまうので、待つだけにする。
+        if self.pending.is_none()
+            && matches!(c, 'd' | 'y' | '>' | '<' | 'g')
+        {
+            self.pending = Some(c);
+            return;
+        }
+        let given = self.count.take();
+        let count = given.unwrap_or(1);
         // dd や >> のような2打鍵の命令。
         if let Some(first) = self.pending.take() {
             match (first, c) {
                 ('d', 'd') => {
                     self.begin_edit();
-                    self.delete_node();
+                    self.delete_node(count);
                 }
+                ('y', 'y') => self.yank(count),
                 ('>', '>') => {
                     self.begin_edit();
                     self.indent();
@@ -1141,23 +1286,53 @@ impl App {
             }
             'x' => {
                 self.begin_edit();
-                self.delete_char();
+                for _ in 0..count {
+                    self.delete_char();
+                }
+            }
+            'p' => {
+                self.begin_edit();
+                self.paste(false, count);
+            }
+            'P' => {
+                self.begin_edit();
+                self.paste(true, count);
             }
             'u' => self.undo(),
-            'h' => self.move_left(),
-            'j' => self.move_down(),
-            'k' => self.move_up(),
-            'l' => self.move_right(),
+            'h' => {
+                for _ in 0..count {
+                    self.move_left();
+                }
+            }
+            'j' => {
+                for _ in 0..count {
+                    self.move_down();
+                }
+            }
+            'k' => {
+                for _ in 0..count {
+                    self.move_up();
+                }
+            }
+            'l' => {
+                for _ in 0..count {
+                    self.move_right();
+                }
+            }
             '0' => self.cursor_col = 0,
             '$' => self.cursor_col = self.text().len(),
-            'G' => self.move_to(self.nodes.len() - 1),
+            'G' => {
+                // 回数があればその番号のノードへ。
+                let index = match given {
+                    Some(number) => number - 1,
+                    None => self.nodes.len() - 1,
+                };
+                self.move_to(index);
+            }
             ':' => {
                 self.command.clear();
                 self.message.clear();
                 self.mode = Mode::Command;
-            }
-            'd' | '>' | '<' | 'g' => {
-                self.pending = Some(c)
             }
             _ => {}
         }
@@ -1910,5 +2085,119 @@ mod tests {
         // 消したぶんは u で戻る。
         press(&mut app, "\x1bu");
         assert_eq!(app.to_scheme(), "()\n\nx");
+    }
+
+    /// ヤンクと貼り付け。
+    #[test]
+    fn yank_paste() {
+        // yy はノード1つ。p は次の兄弟に貼る。
+        let mut app = insert("f\n\ta\nb");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        press(&mut app, "\x1bkyy");
+        assert_eq!(app.message, "1ノードをヤンクしました");
+        press(&mut app, "p");
+        assert_eq!(app.to_scheme(), "(f a a b)");
+        assert_eq!(app.cursor, 2);
+        // P は手前に貼る。
+        press(&mut app, "P");
+        assert_eq!(app.to_scheme(), "(f a a a b)");
+        // 回数を付けて貼る。
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1byy2p");
+        assert_eq!(app.to_scheme(), "(f a a a)");
+        // 3yy は連続3ノードを相対の深さごと取る。
+        let mut app = insert("f\n\ta\n\tb\n\x08c");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f (a b) c)");
+        press(&mut app, "gg3yyGp");
+        assert_eq!(
+            app.to_scheme(),
+            "(f (a b) c (f (a b)))"
+        );
+        // 何もヤンクしていなければ断る。
+        let mut app = insert("a");
+        press(&mut app, "\x1bp");
+        assert_eq!(app.message, "何もヤンクしていません");
+    }
+
+    /// 中身も子も無い ◦ は貼り付けで置き換わる。
+    #[test]
+    fn paste_replaces_empty_node() {
+        let mut app = insert("f\n\ta\n");
+        assert_eq!(app.to_scheme(), "(f a ())");
+        press(&mut app, "\x1bkyyjp");
+        assert_eq!(app.to_scheme(), "(f a a)");
+        assert_eq!(app.cursor, 2);
+        // 子を持つ ◦ は置き換えない。
+        let mut app = insert("f\n\ta\n\n\tb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a (b))");
+        press(&mut app, "ggjyyjp");
+        assert_eq!(app.to_scheme(), "(f a () (a b))");
+    }
+
+    /// p は次の行にカーソルと同じ深さで割り込む。
+    #[test]
+    fn paste_interrupts() {
+        // 葉の上では兄弟になる。
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        press(&mut app, "kyyp");
+        assert_eq!(app.to_scheme(), "(f a a b)");
+        assert_eq!(app.cursor, 2);
+        // 子を持つノードの上では、続く深い行が
+        // 貼ったノードのものになる。
+        let mut app = insert("f\n\ta\n\tb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f (a b))");
+        press(&mut app, "yykp");
+        assert_eq!(app.to_scheme(), "(f a (b b))");
+    }
+
+    /// 回数指定。
+    #[test]
+    fn counts() {
+        // 移動。
+        let mut app = insert("a\nb\nc\nd");
+        press(&mut app, "\x1bgg2j");
+        assert_eq!(app.cursor, 2);
+        press(&mut app, "2k");
+        assert_eq!(app.cursor, 0);
+        // 3G は3番目のノード。G だけなら末尾。
+        press(&mut app, "3G");
+        assert_eq!(app.cursor, 2);
+        press(&mut app, "G");
+        assert_eq!(app.cursor, 3);
+        // 2桁も溜まる。
+        press(&mut app, "gg10j");
+        assert_eq!(app.cursor, 3);
+        // 0は溜まっていなければ行頭移動。
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0");
+        assert_eq!(app.cursor_col, 0);
+        assert_eq!(app.count, None);
+        // 2x は2文字消す。
+        press(&mut app, "2x");
+        assert_eq!(app.to_scheme(), "c");
+        // Escで回数を捨てる。
+        press(&mut app, "3\x1b");
+        assert_eq!(app.count, None);
+    }
+
+    /// まとめて消すと深さが飛ぶので復元する。
+    #[test]
+    fn delete_repairs_depth() {
+        // a(0) b(1) c(2) d(3) から b c を消すと
+        // a(0) d(3) が残り、深さが0から3に飛ぶ。
+        let mut app = insert("a\n\tb\n\tc\n\td");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(a (b (c d)))");
+        press(&mut app, "ggj2dd");
+        assert_eq!(app.to_scheme(), "(a d)");
+        assert_eq!(app.nodes[1].depth, 1);
+        // 消したぶんはレジスタに入る。
+        press(&mut app, "p");
+        assert_eq!(app.to_scheme(), "(a d (b c))");
     }
 }
