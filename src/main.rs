@@ -144,6 +144,17 @@ fn emit(
     }
 }
 
+/// 積んでおくアンドゥの段数。
+const UNDO_LIMIT: usize = 100;
+
+/// 巻き戻すために丸ごと控えておく状態。
+#[derive(Clone)]
+struct Snapshot {
+    nodes: Vec<Node>,
+    cursor: usize,
+    cursor_col: usize,
+}
+
 #[derive(PartialEq)]
 enum Mode {
     Normal,
@@ -166,6 +177,13 @@ struct App {
     /// 画面下に出す一言。
     message: String,
     quit: bool,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// 編集の区切りで取った控え。
+    ///
+    /// 実際に変更が起きるまでundoには積まない。
+    /// 何もしなかった i → Esc で空の段を作らないため。
+    held: Option<Snapshot>,
 }
 
 impl App {
@@ -187,7 +205,81 @@ impl App {
             modified: false,
             message: String::new(),
             quit: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            held: None,
         }
+    }
+
+    // ------------------------------------------------------------
+    // アンドゥ
+    // ------------------------------------------------------------
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            nodes: self.nodes.clone(),
+            cursor: self.cursor,
+            cursor_col: self.cursor_col,
+        }
+    }
+
+    /// 編集の区切り。
+    ///
+    /// 挿入モードに入るときと、Normalモードの
+    /// 編集命令の直前に呼ぶ。挿入中は呼ばないので、
+    /// i から Esc までが1段にまとまる。
+    fn begin_edit(&mut self) {
+        self.held = Some(self.snapshot());
+    }
+
+    /// 変更が起きたときに呼ぶ。
+    ///
+    /// 控えがあれば1回だけ確定する。2文字目以降は
+    /// 控えが空なので何もしない。
+    fn record(&mut self) {
+        self.modified = true;
+
+        let Some(held) = self.held.take() else {
+            return;
+        };
+
+        self.undo.push(held);
+
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.nodes = snapshot.nodes;
+        self.cursor = snapshot.cursor;
+        self.cursor_col = snapshot.cursor_col;
+        self.held = None;
+        self.modified = true;
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo.pop() else {
+            self.message =
+                "これ以上戻れません".to_string();
+            return;
+        };
+
+        self.redo.push(self.snapshot());
+        self.restore(snapshot);
+    }
+
+    fn redo(&mut self) {
+        let Some(snapshot) = self.redo.pop() else {
+            self.message =
+                "これ以上やり直せません".to_string();
+            return;
+        };
+
+        self.undo.push(self.snapshot());
+        self.restore(snapshot);
     }
 
     // ------------------------------------------------------------
@@ -287,6 +379,10 @@ impl App {
         self.cursor = 0;
         self.cursor_col = 0;
         self.modified = false;
+        // ファイルが入れ替わるので履歴は捨てる。
+        self.undo.clear();
+        self.redo.clear();
+        self.held = None;
 
         self.message = if reading.hoisted > 0 {
             format!(
@@ -357,7 +453,7 @@ impl App {
             },
         );
         self.cursor_col = 0;
-        self.modified = true;
+        self.record();
     }
 
     /// カーソル位置の1文字を消す。
@@ -371,7 +467,7 @@ impl App {
         {
             node.text
                 .drain(column..column + c.len_utf8());
-            self.modified = true;
+            self.record();
         }
     }
 
@@ -380,7 +476,7 @@ impl App {
 
         node.text.insert(self.cursor_col, c);
         self.cursor_col += c.len_utf8();
-        self.modified = true;
+        self.record();
     }
 
     fn backspace(&mut self) {
@@ -401,7 +497,7 @@ impl App {
             );
 
             self.cursor_col -= len;
-            self.modified = true;
+            self.record();
         }
     }
 
@@ -418,7 +514,7 @@ impl App {
 
         self.cursor += 1;
         self.cursor_col = 0;
-        self.modified = true;
+        self.record();
     }
 
     fn indent(&mut self) {
@@ -434,14 +530,14 @@ impl App {
 
         if current_depth < previous_depth + 1 {
             self.nodes[self.cursor].depth += 1;
-            self.modified = true;
+            self.record();
         }
     }
 
     fn unindent(&mut self) {
         if self.nodes[self.cursor].depth > 0 {
             self.nodes[self.cursor].depth -= 1;
-            self.modified = true;
+            self.record();
         }
     }
 
@@ -508,7 +604,7 @@ impl App {
             self.nodes[0].text.clear();
             self.nodes[0].depth = 0;
             self.cursor_col = 0;
-            self.modified = true;
+            self.record();
             return;
         }
         let depth = self.nodes[self.cursor].depth;
@@ -525,7 +621,7 @@ impl App {
         }
         self.cursor_col =
             self.cursor_col.min(self.text().len());
-        self.modified = true;
+        self.record();
     }
 
     // ------------------------------------------------------------
@@ -896,9 +992,7 @@ impl App {
         }
 
         match self.mode {
-            Mode::Normal => {
-                self.handle_normal(key.code)
-            }
+            Mode::Normal => self.handle_normal(key),
             Mode::Insert => {
                 self.handle_insert(key.code)
             }
@@ -946,9 +1040,19 @@ impl App {
         true
     }
 
-    fn handle_normal(&mut self, code: KeyCode) {
-        let KeyCode::Char(c) = code else {
-            if code == KeyCode::Esc {
+    fn handle_normal(&mut self, key: KeyEvent) {
+        if key
+            .modifiers
+            .contains(KeyModifiers::CONTROL)
+        {
+            if key.code == KeyCode::Char('r') {
+                self.redo();
+            }
+            return;
+        }
+
+        let KeyCode::Char(c) = key.code else {
+            if key.code == KeyCode::Esc {
                 self.pending = None;
             }
             return;
@@ -956,37 +1060,58 @@ impl App {
         // dd や >> のような2打鍵の命令。
         if let Some(first) = self.pending.take() {
             match (first, c) {
-                ('d', 'd') => self.delete_node(),
-                ('>', '>') => self.indent(),
-                ('<', '<') => self.unindent(),
+                ('d', 'd') => {
+                    self.begin_edit();
+                    self.delete_node();
+                }
+                ('>', '>') => {
+                    self.begin_edit();
+                    self.indent();
+                }
+                ('<', '<') => {
+                    self.begin_edit();
+                    self.unindent();
+                }
                 ('g', 'g') => self.move_to(0),
                 _ => {}
             }
             return;
         }
         match c {
-            'i' => self.mode = Mode::Insert,
+            'i' => {
+                self.begin_edit();
+                self.mode = Mode::Insert;
+            }
             'a' => {
+                self.begin_edit();
                 self.move_right();
                 self.mode = Mode::Insert;
             }
             'I' => {
+                self.begin_edit();
                 self.cursor_col = 0;
                 self.mode = Mode::Insert;
             }
             'A' => {
+                self.begin_edit();
                 self.cursor_col = self.text().len();
                 self.mode = Mode::Insert;
             }
             'o' => {
+                self.begin_edit();
                 self.enter();
                 self.mode = Mode::Insert;
             }
             'O' => {
+                self.begin_edit();
                 self.open_above();
                 self.mode = Mode::Insert;
             }
-            'x' => self.delete_char(),
+            'x' => {
+                self.begin_edit();
+                self.delete_char();
+            }
+            'u' => self.undo(),
             'h' => self.move_left(),
             'j' => self.move_down(),
             'k' => self.move_up(),
@@ -1627,6 +1752,85 @@ mod tests {
         fs::write(&path, "(a").unwrap();
         press(&mut app, ":e!\n");
         assert!(app.message.contains("括弧が閉じていません"));
+        let _ = fs::remove_file(&path);
+    }
+
+    /// アンドゥとリドゥ。
+    #[test]
+    fn undo_redo() {
+        // 挿入セッション全体が1段。
+        let mut app = insert("abc");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "abc");
+        press(&mut app, "u");
+        assert_eq!(app.to_scheme(), "()");
+        assert_eq!(app.undo.len(), 0);
+        // Ctrl-rで戻る。
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.to_scheme(), "abc");
+        // 何も打たずに抜けた挿入は段を作らない。
+        let mut app = insert("a");
+        press(&mut app, "\x1b");
+        let depth = app.undo.len();
+        press(&mut app, "i\x1b");
+        assert_eq!(app.undo.len(), depth);
+        // 空振りのxも段を作らない。
+        press(&mut app, "$x");
+        assert_eq!(app.undo.len(), depth);
+        // Normalの編集命令はそれぞれ1段。
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        press(&mut app, "dd");
+        assert_eq!(app.to_scheme(), "(f a)");
+        press(&mut app, "<<");
+        assert_eq!(app.to_scheme(), "f\n\na");
+        press(&mut app, "uu");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        // 戻ったあとに編集するとリドゥは消える。
+        press(&mut app, "dd");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.to_scheme(), "(f a)");
+        assert!(app.redo.is_empty());
+        // カーソルも戻る。
+        let mut app = insert("abc\nx");
+        press(&mut app, "\x1bdd");
+        assert_eq!(app.cursor, 0);
+        press(&mut app, "u");
+        assert_eq!(app.cursor, 1);
+        // 端では断る。
+        let mut app = App::new();
+        press(&mut app, "u");
+        assert_eq!(app.message, "これ以上戻れません");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.message, "これ以上やり直せません");
+    }
+
+    /// :e は履歴を捨てる。
+    #[test]
+    fn edit_clears_history() {
+        let path = std::env::temp_dir()
+            .join("seditor-undo.scm");
+        fs::write(&path, "(a b)\n").unwrap();
+        let mut app = insert("x");
+        press(&mut app, "\x1b");
+        assert!(!app.undo.is_empty());
+        press(
+            &mut app,
+            &format!(":e! {}\n", path.display()),
+        );
+        assert_eq!(app.to_scheme(), "(a b)");
+        assert!(app.undo.is_empty());
+        assert!(app.redo.is_empty());
         let _ = fs::remove_file(&path);
     }
 }
