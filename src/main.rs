@@ -168,6 +168,29 @@ fn normalize(nodes: &[Node]) -> Vec<Node> {
         .collect()
 }
 
+/// 行番号の最小の桁数。
+///
+/// ノード数が9→10と増えるたびに桁が変わると
+/// 木全体が横にずれるので、下限を決めておく。
+const NUMBER_WIDTH: usize = 3;
+
+/// count行に行番号を振るときの桁幅。空白1つを含む。
+fn number_width(count: usize) -> usize {
+    let digits = count.to_string().len();
+    digits.max(NUMBER_WIDTH) + 1
+}
+
+/// 淡く表示する行番号。
+fn number_span(
+    line: usize,
+    width: usize,
+) -> Span<'static> {
+    Span::styled(
+        format!("{:>1$} ", line, width - 1),
+        Style::default().add_modifier(Modifier::DIM),
+    )
+}
+
 /// 巻き戻すために丸ごと控えておく状態。
 #[derive(Clone)]
 struct Snapshot {
@@ -204,6 +227,8 @@ struct App {
     register: Vec<Node>,
     /// 数字を溜めた回数指定。
     count: Option<usize>,
+    /// 行番号を出すか。:set number で切り替える。
+    number: bool,
     /// 画面最上部の行番号。
     scroll: usize,
     /// ソース表示のスクロール位置。
@@ -242,6 +267,7 @@ impl App {
             redo: Vec::new(),
             register: Vec::new(),
             count: None,
+            number: false,
             scroll: 0,
             source_scroll: 0,
             height: 0,
@@ -414,6 +440,40 @@ impl App {
             return;
         };
 
+        // :42 で42行目へ、:$ で末尾へ。
+        // ソース表示ではその行を最上部に出す。
+        let line = match name {
+            "$" => Some(usize::MAX),
+            _ => name.parse::<usize>().ok(),
+        };
+
+        if let Some(line) = line {
+            let index = line.saturating_sub(1);
+            if self.source_mode {
+                let last = self
+                    .source_lines
+                    .saturating_sub(self.height);
+                self.source_scroll = index.min(last);
+            } else {
+                self.move_to(index);
+            }
+            return;
+        }
+
+        if name == "set" {
+            // :set number nonumber のように並べられる。
+            let options: Vec<&str> = words.collect();
+            if options.is_empty() {
+                self.message =
+                    "設定項目がありません".to_string();
+                return;
+            }
+            for option in options {
+                self.set_option(option);
+            }
+            return;
+        }
+
         let argument = words.next();
 
         match name {
@@ -446,6 +506,23 @@ impl App {
             _ => {
                 self.message =
                     format!("不明なコマンドです: {}", name)
+            }
+        }
+    }
+
+    /// :set の項目を1つ処理する。
+    fn set_option(&mut self, option: &str) {
+        match option {
+            "number" | "nu" => self.number = true,
+            "nonumber" | "nonu" => self.number = false,
+            "number!" | "nu!" => {
+                self.number = !self.number
+            }
+            _ => {
+                self.message = format!(
+                    "不明な設定項目です: {}",
+                    option
+                )
             }
         }
     }
@@ -899,12 +976,25 @@ impl App {
         let highlight = Style::default()
             .add_modifier(Modifier::REVERSED);
 
+        let width = number_width(self.nodes.len());
+
         self.tree_lines()
             .into_iter()
             .enumerate()
             .map(|(index, line)| {
+                // 行番号は独立したSpanにする。
+                // 本文に混ぜるとカーソルの位置が
+                // 桁のぶんずれる。
+                let mut spans = Vec::new();
+                if self.number {
+                    spans.push(number_span(
+                        index + 1,
+                        width,
+                    ));
+                }
                 if index != self.cursor {
-                    return Line::from(line);
+                    spans.push(Span::raw(line));
+                    return Line::from(spans);
                 }
                 // 空ノードは◦の上にカーソルを置く。
                 let text = &self.nodes[index].text;
@@ -925,11 +1015,10 @@ impl App {
                     ),
                     None => (" ".to_string(), String::new()),
                 };
-                Line::from(vec![
-                    Span::raw(left.to_string()),
-                    Span::styled(cell, highlight),
-                    Span::raw(right),
-                ])
+                spans.push(Span::raw(left.to_string()));
+                spans.push(Span::styled(cell, highlight));
+                spans.push(Span::raw(right));
+                Line::from(spans)
             })
             .collect()
     }
@@ -1489,12 +1578,27 @@ fn draw(
     let text: Text = if app.source_mode {
         let source = app.to_scheme();
         app.source_lines = source.lines().count();
+        let width = number_width(app.source_lines);
         // 短くなっていれば行き過ぎを戻す。
         app.source_scroll = app.source_scroll.min(
             app.source_lines
                 .saturating_sub(app.height),
         );
-        source.into()
+        if app.number {
+            source
+                .lines()
+                .enumerate()
+                .map(|(index, line)| {
+                    Line::from(vec![
+                        number_span(index + 1, width),
+                        Span::raw(line.to_string()),
+                    ])
+                })
+                .collect::<Vec<Line>>()
+                .into()
+        } else {
+            source.into()
+        }
     } else {
         app.follow_cursor();
         app.tree_display().into()
@@ -2417,7 +2521,8 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let mut lines = Vec::new();
-        for y in 1..buffer.area.height - 1 {
+        // 枠の上下を除いた行だけを見る。
+        for y in 1..buffer.area.height - 2 {
             let mut line = String::new();
             for x in 1..buffer.area.width - 1 {
                 line.push_str(buffer[(x, y)].symbol());
@@ -2534,5 +2639,113 @@ mod tests {
         press(&mut app, "i");
         key(&mut app, KeyCode::PageDown);
         assert_eq!(top(&mut terminal, &mut app), "10");
+    }
+
+    /// :set number。
+    #[test]
+    fn line_numbers() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(30, 8),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "if\n\ta\nb\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        // 既定では出ない。
+        assert_eq!(
+            screen(&mut terminal, &mut app)[0],
+            "f"
+        );
+        // ノード番号は1から。5Gの飛び先と一致する。
+        press(&mut app, ":set number\n");
+        assert!(app.number);
+        assert_eq!(
+            screen(&mut terminal, &mut app),
+            vec![
+                "  1 f",
+                "  2 ├── a",
+                "  3 └── b",
+            ]
+        );
+        // 略記とトグル。
+        press(&mut app, ":set nonu\n");
+        assert!(!app.number);
+        press(&mut app, ":set nu!\n");
+        assert!(app.number);
+        press(&mut app, ":set nu!\n");
+        assert!(!app.number);
+        press(&mut app, ":set nu\n");
+        assert!(app.number);
+        // 複数まとめて指定できる。
+        press(&mut app, ":set nonumber number\n");
+        assert!(app.number);
+        // 未知の項目。
+        press(&mut app, ":set zzz\n");
+        assert_eq!(
+            app.message,
+            "不明な設定項目です: zzz"
+        );
+        press(&mut app, ":set\n");
+        assert_eq!(app.message, "設定項目がありません");
+        // ソース表示は出力の行番号。
+        app.source_mode = true;
+        assert_eq!(
+            screen(&mut terminal, &mut app),
+            vec!["  1 (f a b)"]
+        );
+    }
+
+    /// 桁幅はノード数が増えてもすぐには変わらない。
+    #[test]
+    fn number_width_is_stable() {
+        // 3桁までは同じ幅。
+        assert_eq!(number_width(1), 4);
+        assert_eq!(number_width(9), 4);
+        assert_eq!(number_width(10), 4);
+        assert_eq!(number_width(999), 4);
+        // 超えたら広げる。
+        assert_eq!(number_width(1000), 5);
+    }
+
+    /// :42 で行へ移動する。
+    #[test]
+    fn goto_line() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..20 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1b");
+        // 1から数える。番号はノードの通し番号。
+        press(&mut app, ":1\n");
+        assert_eq!(app.cursor, 0);
+        press(&mut app, ":12\n");
+        assert_eq!(app.cursor, 11);
+        // 画面も付いてくる。
+        press(&mut app, ":set number\n");
+        assert_eq!(
+            screen(&mut terminal, &mut app)[6],
+            " 12 11"
+        );
+        // :0 は先頭。
+        press(&mut app, ":0\n");
+        assert_eq!(app.cursor, 0);
+        // :$ は末尾。
+        press(&mut app, ":$\n");
+        assert_eq!(app.cursor, 19);
+        // 行数を超えたら末尾で止まる。
+        press(&mut app, ":1\n:999\n");
+        assert_eq!(app.cursor, 19);
+        // ソース表示ではその行を最上部に出す。
+        app.source_mode = true;
+        screen(&mut terminal, &mut app);
+        let before = app.cursor;
+        press(&mut app, ":10\n");
+        assert_eq!(app.source_scroll, 9);
+        assert_eq!(app.cursor, before);
     }
 }
