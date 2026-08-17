@@ -199,7 +199,7 @@ struct Snapshot {
     cursor_col: usize,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Mode {
     Normal,
     Insert,
@@ -1431,6 +1431,24 @@ impl App {
         ) && key.code == KeyCode::Char('c')
         {
             return false;
+        }
+
+        // EscのすぐあとにキーがくるとOSが1回のreadで
+        // まとめて渡すことがあり、crosstermはそれを
+        // Escと後続キーではなくAlt+キー1個として解釈
+        // する。このアプリはAltを使わないので、
+        // Escに続けて同じキーを打ったものとして
+        // 分解する。
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            self.handle_key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ));
+
+            return self.handle_key(KeyEvent::new(
+                key.code,
+                key.modifiers & !KeyModifiers::ALT,
+            ));
         }
 
         // コマンド入力中は矢印もF2も横取りしない。
@@ -3163,6 +3181,42 @@ mod tests {
             KeyCode::Delete,
             KeyModifiers::NONE,
         ));
+        assert_eq!(app.to_scheme(), "(f a)");
+    }
+
+    /// EscとすぐあとのキーがAlt+キーに合流しても、
+    /// Escに続けてそのキーを打ったのと同じになる。
+    #[test]
+    fn alt_key_splits_into_esc_and_key() {
+        // Esc+: でNormalに抜けてコマンド入力に入る。
+        let mut app = insert("abc");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char(':'),
+            KeyModifiers::ALT,
+        ));
+        assert_eq!(app.mode, Mode::Command);
+        assert_eq!(app.to_scheme(), "abc");
+        // Esc+i でNormalに抜けてすぐInsertへ戻る。
+        // 実際に打った1文字だけが入る。
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::ALT,
+        ));
+        assert_eq!(app.mode, Mode::Insert);
+        press(&mut app, "X");
+        assert_eq!(app.to_scheme(), "Xabc");
+        // Normalモードでも同じキーとして届く。
+        // Esc+dd でノードを1つ消す。
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::ALT,
+        ));
+        press(&mut app, "d");
         assert_eq!(app.to_scheme(), "(f a)");
     }
 }
