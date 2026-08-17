@@ -665,9 +665,28 @@ impl App {
 
         let column = self.cursor_col;
         let node = &mut self.nodes[self.cursor];
+
         if column >= node.text.len() {
+            // 末尾ならBackspaceの逆で、次のノードの
+            // テキストを引き込んで合流する。
+            if self.cursor + 1 >= self.nodes.len() {
+                return;
+            }
+
+            let text =
+                self.nodes[self.cursor + 1].text.clone();
+
+            self.nodes[self.cursor].text.push_str(&text);
+            self.nodes.remove(self.cursor + 1);
+
+            // 引き込んだノードに子があれば深さが
+            // 飛ぶので、dd と同じく1段持ち上げる。
+            self.repair();
+
+            self.record();
             return;
         }
+
         if let Some(c) = node.text[column..].chars().next()
         {
             node.text
@@ -710,6 +729,33 @@ impl App {
         }
 
         if self.cursor_col == 0 {
+            // 先頭ならEnterの逆で、前のノードの
+            // 末尾にテキストをくっつけて合流する。
+            if self.cursor == 0 {
+                return;
+            }
+
+            let text = self.nodes[self.cursor]
+                .text
+                .clone();
+
+            let join_at =
+                self.nodes[self.cursor - 1].text.len();
+
+            self.nodes[self.cursor - 1]
+                .text
+                .push_str(&text);
+
+            self.nodes.remove(self.cursor);
+
+            self.cursor -= 1;
+            self.cursor_col = join_at;
+
+            // 消したノードに子があれば深さが飛ぶので、
+            // dd と同じく1段持ち上げる。
+            self.repair();
+
+            self.record();
             return;
         }
 
@@ -730,15 +776,21 @@ impl App {
         }
     }
 
+    /// カーソルから後ろのテキストを次のノードに移す。
+    ///
+    /// 文の途中でEnterしたとき、その場で分かれる
+    /// ようにする。カーソルが末尾なら次は空になる。
     fn enter(&mut self) {
         let depth = self.nodes[self.cursor].depth;
+        let column = self.cursor_col;
+
+        let rest = self.nodes[self.cursor]
+            .text
+            .split_off(column);
 
         self.nodes.insert(
             self.cursor + 1,
-            Node {
-                text: String::new(),
-                depth,
-            },
+            Node { text: rest, depth },
         );
 
         self.cursor += 1;
@@ -768,6 +820,50 @@ impl App {
             self.nodes[self.cursor].depth -= 1;
             self.record();
         }
+    }
+
+    /// カーソルの部分木を子孫ごと1段下げる。
+    ///
+    /// indent()をカーソルのノードだけに使うと、
+    /// 子孫の深さは変わらないまま親子関係が崩れる。
+    /// 上限はindent()と同じ。
+    fn indent_subtree(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let previous_depth =
+            self.nodes[self.cursor - 1].depth;
+
+        let current_depth =
+            self.nodes[self.cursor].depth;
+
+        if current_depth >= previous_depth + 1 {
+            return;
+        }
+
+        let end = self.subtree_end(self.cursor);
+
+        for node in &mut self.nodes[self.cursor..end] {
+            node.depth += 1;
+        }
+
+        self.record();
+    }
+
+    /// カーソルの部分木を子孫ごと1段上げる。
+    fn unindent_subtree(&mut self) {
+        if self.nodes[self.cursor].depth == 0 {
+            return;
+        }
+
+        let end = self.subtree_end(self.cursor);
+
+        for node in &mut self.nodes[self.cursor..end] {
+            node.depth -= 1;
+        }
+
+        self.record();
     }
 
     fn move_up(&mut self) {
@@ -875,6 +971,30 @@ impl App {
         self.cursor_col =
             self.cursor_col.min(self.text().len());
         self.record();
+    }
+
+    /// indexの部分木の直後の位置。
+    ///
+    /// 深さがindexと同じか浅くなる手前まで。
+    fn subtree_end(&self, index: usize) -> usize {
+        let depth = self.nodes[index].depth;
+        let mut i = index + 1;
+
+        while i < self.nodes.len()
+            && self.nodes[i].depth > depth
+        {
+            i += 1;
+        }
+
+        i
+    }
+
+    /// カーソルの部分木のノード数。
+    ///
+    /// Y と D はこれを個数として渡すので、
+    /// yank と delete_node をそのまま使える。
+    fn subtree_len(&self) -> usize {
+        self.subtree_end(self.cursor) - self.cursor
     }
 
     /// カーソルから count 個のノードをヤンクする。
@@ -1409,6 +1529,32 @@ impl App {
             return;
         }
 
+        // Tab/Shift-Tabは部分木ごと。1行だけの
+        // indent()/unindent()はInsertモードのまま。
+        match key.code {
+            KeyCode::Tab => {
+                self.begin_edit();
+                self.indent_subtree();
+                return;
+            }
+            KeyCode::BackTab => {
+                self.begin_edit();
+                self.unindent_subtree();
+                return;
+            }
+            // xと同じ。カーソル位置の1文字を消す。
+            KeyCode::Delete => {
+                let count =
+                    self.count.take().unwrap_or(1);
+                self.begin_edit();
+                for _ in 0..count {
+                    self.delete_char();
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let KeyCode::Char(c) = key.code else {
             if key.code == KeyCode::Esc {
                 self.pending = None;
@@ -1452,11 +1598,11 @@ impl App {
                 ('y', 'y') => self.yank(count),
                 ('>', '>') => {
                     self.begin_edit();
-                    self.indent();
+                    self.indent_subtree();
                 }
                 ('<', '<') => {
                     self.begin_edit();
-                    self.unindent();
+                    self.unindent_subtree();
                 }
                 ('g', 'g') => self.move_to(0),
                 _ => {}
@@ -1507,6 +1653,16 @@ impl App {
                 self.begin_edit();
                 self.paste(true, count);
             }
+            // 部分木ごと。回数は受けない。
+            'Y' => {
+                let length = self.subtree_len();
+                self.yank(length);
+            }
+            'D' => {
+                let length = self.subtree_len();
+                self.begin_edit();
+                self.delete_node(length);
+            }
             'u' => self.undo(),
             'h' => {
                 for _ in 0..count {
@@ -1549,6 +1705,10 @@ impl App {
             KeyCode::Enter => self.enter(),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_char(),
+            KeyCode::Home => self.cursor_col = 0,
+            KeyCode::End => {
+                self.cursor_col = self.text().len()
+            }
             KeyCode::Char(c) => self.insert_char(c),
             _ => {}
         }
@@ -2747,5 +2907,262 @@ mod tests {
         press(&mut app, ":10\n");
         assert_eq!(app.source_scroll, 9);
         assert_eq!(app.cursor, before);
+    }
+
+    /// Y と D は部分木ごと。
+    #[test]
+    fn subtree_yank_cut() {
+        // cond の節をまるごと複製する。
+        let mut app = insert(
+            "cond\n\t\n\t<\n\tx\n2\n\x081\n\x08\n\telse\n0",
+        );
+        press(&mut app, "\x1b");
+        assert_eq!(
+            app.to_scheme(),
+            "(cond ((< x 2) 1)\n      (else 0))"
+        );
+        // 2行目の ◦ が節の頭。子孫は4つ。
+        press(&mut app, ":2\nY");
+        assert_eq!(
+            app.message,
+            "5ノードをヤンクしました"
+        );
+        // 次の節の頭に移り、手前に入れる。
+        press(&mut app, ":7\nP");
+        assert_eq!(
+            app.to_scheme(),
+            "(cond ((< x 2) 1)\n      ((< x 2) 1)\n      (else 0))"
+        );
+        // D は同じ範囲を切り取る。
+        press(&mut app, "D");
+        assert_eq!(
+            app.to_scheme(),
+            "(cond ((< x 2) 1)\n      (else 0))"
+        );
+        // 切り取ったものは貼り戻せる。
+        press(&mut app, "P");
+        assert_eq!(
+            app.to_scheme(),
+            "(cond ((< x 2) 1)\n      ((< x 2) 1)\n      (else 0))"
+        );
+        // 回数は受けない。
+        let mut app = insert("f\n\ta\nb\nc");
+        press(&mut app, "\x1bgg");
+        press(&mut app, "j3Y");
+        assert_eq!(
+            app.message,
+            "1ノードをヤンクしました"
+        );
+        // 葉の上では1ノードだけ。dd と同じ結果になる。
+        press(&mut app, "D");
+        assert_eq!(app.to_scheme(), "(f b c)");
+        // 根の上なら全部消える。
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1bggD");
+        assert_eq!(app.to_scheme(), "()");
+        press(&mut app, "u");
+        assert_eq!(app.to_scheme(), "(f a b)");
+    }
+
+
+    /// Normalモードの >> << Tab Shift-Tab は
+    /// 部分木ごと動かす。子孫を置き去りにしない。
+    #[test]
+    fn subtree_indent() {
+        // (f (a b)) で a を << すると、以前は
+        // 深さが 0 から 2 に飛んでbが消えていた。
+        let mut app = insert("f\n\ta\n\tb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f (a b))");
+        press(&mut app, "k<<");
+        assert_eq!(app.to_scheme(), "f\n\n(a b)");
+        assert_eq!(
+            app.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+            vec![0, 0, 1]
+        );
+        // f a (b) で a を >> すると、以前はbが
+        // aの子から兄弟に変わっていた。
+        let mut app = insert("f\na\n\tb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "f\n\n(a b)");
+        press(&mut app, "k>>");
+        assert_eq!(app.to_scheme(), "(f (a b))");
+        assert_eq!(
+            app.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // Tab/Shift-Tabも同じ。
+        press(&mut app, "\x08");
+        assert_eq!(app.to_scheme(), "f\n\n(a b)");
+        press(&mut app, "\t");
+        assert_eq!(app.to_scheme(), "(f (a b))");
+        // 上限は従来のindentと同じ。
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1bk>>");
+        assert_eq!(app.to_scheme(), "(f a)");
+        // 深さ0では<<は何もしない。
+        let mut app = insert("a\nb");
+        press(&mut app, "\x1bgg<<");
+        assert_eq!(app.to_scheme(), "a\n\nb");
+    }
+
+    /// Insertモードの Tab/Shift-Tab は従来通り1行だけ。
+    ///
+    /// aだけ動かしてbは置き去りにする。bの深さは
+    /// 変わらないままaとの間に穴が空くので、
+    /// to_scheme()には出なくなる（既知の性質）。
+    #[test]
+    fn insert_mode_indent_is_single_line() {
+        let mut app = insert("f\n\ta\n\tb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f (a b))");
+        press(&mut app, "ki\x08");
+        assert_eq!(
+            app.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+            vec![0, 0, 2]
+        );
+    }
+
+    /// Enterはカーソル位置でテキストを分ける。
+    #[test]
+    fn enter_splits_text() {
+        // abcの真ん中でEnter。
+        let mut app = insert("abc");
+        press(&mut app, "\x1bhi\n");
+        assert_eq!(app.to_scheme(), "ab\n\nc");
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.cursor_col, 0);
+        // 末尾でEnterすれば次は空のまま。
+        let mut app = insert("abc");
+        press(&mut app, "\n");
+        assert_eq!(app.to_scheme(), "abc\n\n()");
+        // 先頭でEnterすれば元のノードが空になる。
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0i\n");
+        assert_eq!(app.to_scheme(), "()\n\nabc");
+    }
+
+    /// Insertモードの End は行末へ。
+    #[test]
+    fn end_key_moves_to_end() {
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0i");
+        assert_eq!(app.cursor_col, 0);
+        app.handle_key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.cursor_col, 3);
+    }
+
+    /// 行頭のBackspaceは前のノードに合流する。
+    /// enter_splits_textの逆になる。
+    #[test]
+    fn backspace_joins_with_previous() {
+        // ab / c を合流すると abc に戻る。
+        let mut app = insert("ab\nc");
+        assert_eq!(app.to_scheme(), "ab\n\nc");
+        press(&mut app, "\x1b0i");
+        press(&mut app, "\x7f");
+        assert_eq!(app.to_scheme(), "abc");
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.cursor_col, 2);
+        // 消したノードに子があれば持ち上がる。
+        let mut app = insert("f\n\ta\n\x08b\n\tc");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a)\n\n(b c)");
+        // b (3番目のノード) の先頭でBackspace。
+        // bはaの末尾に合流し、子だったcは
+        // 一段浅いabの兄弟としてfの子に入る。
+        press(&mut app, ":3\n0i");
+        press(&mut app, "\x7f");
+        assert_eq!(app.to_scheme(), "(f ab c)");
+        // 先頭のノードでは何もしない。
+        let mut app = insert("a");
+        press(&mut app, "\x1b0i\x7f");
+        assert_eq!(app.to_scheme(), "a");
+    }
+
+    /// Insertモードの Home は行頭へ。
+    #[test]
+    fn home_key_moves_to_start() {
+        let mut app = insert("abc");
+        assert_eq!(app.cursor_col, 3);
+        app.handle_key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.cursor_col, 0);
+    }
+
+    /// 行末のDeleteは次のノードと合流する。
+    /// backspace_joins_with_previousの逆方向。
+    #[test]
+    fn delete_joins_with_next() {
+        // ab / c を合流すると abc に戻る。
+        let mut app = insert("ab\nc");
+        assert_eq!(app.to_scheme(), "ab\n\nc");
+        press(&mut app, "\x1bggi");
+        app.handle_key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        ));
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "abc");
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.cursor_col, 2);
+        // 引き込んだノードに子があれば持ち上がる。
+        let mut app = insert("f\n\ta\n\x08b\n\tc");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a)\n\n(b c)");
+        // aの行末でDelete。bを引き込み、
+        // bの子だったcはabの兄弟としてfの子に入る。
+        press(&mut app, ":2\ni");
+        app.handle_key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        ));
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "(f ab c)");
+        // 最後のノードでは何もしない。
+        let mut app = insert("a");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "a");
+    }
+
+    /// NormalモードのDeleteはxと同じ。回数も効く。
+    #[test]
+    fn delete_key_in_normal_mode() {
+        let mut app = insert("abc");
+        press(&mut app, "\x1b0");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "bc");
+        press(&mut app, "2");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "()");
+        // ◦ の上ではノードごと消す。
+        let mut app = insert("f\n\ta\n");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a ())");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "(f a)");
     }
 }
