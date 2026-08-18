@@ -198,6 +198,10 @@ struct Snapshot {
     nodes: Vec<Node>,
     cursor: usize,
     cursor_col: usize,
+    /// F2の切り替え自体は undo の1段として積まないが、
+    /// これを一緒に控えておくことで、切り替えを挟んで
+    /// 戻っても表示モードと内容の形が食い違わない。
+    source_mode: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -226,6 +230,11 @@ struct App {
     redo: Vec<Snapshot>,
     /// ヤンクした内容。深さは0からの相対値。
     register: Vec<Node>,
+    /// ソース表示用の別レジスタ。
+    ///
+    /// 木の部分木をそのままソース表示に貼ると、
+    /// 相対深さが混ざって表示が崩れるので分けてある。
+    source_register: Vec<Node>,
     /// 数字を溜めた回数指定。
     count: Option<usize>,
     /// 行番号を出すか。:set number で切り替える。
@@ -237,15 +246,11 @@ struct App {
     /// 行番号ガターは対象外で、全行共通の1本。
     /// 行ごとに別々にすると罫線がずれる。
     h_scroll: usize,
-    /// ソース表示のスクロール位置。
-    source_scroll: usize,
     /// 枠の内側の行数。描画時に入る。
     height: usize,
     /// 木の表示でガターを除いた横の文字数。
     /// 描画時に入る。
     width: usize,
-    /// ソース表示の行数。描画時に入る。
-    source_lines: usize,
     /// 編集の区切りで取った控え。
     ///
     /// 実際に変更が起きるまでundoには積まない。
@@ -275,14 +280,13 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             register: Vec::new(),
+            source_register: Vec::new(),
             count: None,
             number: false,
             scroll: 0,
             h_scroll: 0,
-            source_scroll: 0,
             height: 0,
             width: 0,
-            source_lines: 0,
             held: None,
         }
     }
@@ -356,11 +360,6 @@ impl App {
     /// 最小限しか送らないので、scrollも直接動かす。
     /// 両方を同じだけ動かすと画面上の行が変わらない。
     fn scroll_page(&mut self, lines: isize) {
-        if self.source_mode {
-            self.scroll_by(lines);
-            return;
-        }
-
         let last_scroll = self
             .nodes
             .len()
@@ -392,16 +391,6 @@ impl App {
 
     /// カーソルまたは画面をlines行動かす。
     fn scroll_by(&mut self, lines: isize) {
-        if self.source_mode {
-            let last = self
-                .source_lines
-                .saturating_sub(self.height);
-            self.source_scroll = self
-                .source_scroll
-                .saturating_add_signed(lines)
-                .min(last);
-            return;
-        }
         let last = self.nodes.len() - 1;
         self.cursor = self
             .cursor
@@ -420,6 +409,7 @@ impl App {
             nodes: self.nodes.clone(),
             cursor: self.cursor,
             cursor_col: self.cursor_col,
+            source_mode: self.source_mode,
         }
     }
 
@@ -456,6 +446,7 @@ impl App {
         self.nodes = snapshot.nodes;
         self.cursor = snapshot.cursor;
         self.cursor_col = snapshot.cursor_col;
+        self.source_mode = snapshot.source_mode;
         self.held = None;
         self.modified = true;
     }
@@ -495,22 +486,13 @@ impl App {
         };
 
         // :42 で42行目へ、:$ で末尾へ。
-        // ソース表示ではその行を最上部に出す。
         let line = match name {
             "$" => Some(usize::MAX),
             _ => name.parse::<usize>().ok(),
         };
 
         if let Some(line) = line {
-            let index = line.saturating_sub(1);
-            if self.source_mode {
-                let last = self
-                    .source_lines
-                    .saturating_sub(self.height);
-                self.source_scroll = index.min(last);
-            } else {
-                self.move_to(index);
-            }
+            self.move_to(line.saturating_sub(1));
             return;
         }
 
@@ -581,6 +563,76 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------
+    // ソース表示（F2）
+    // ------------------------------------------------------------
+
+    /// F2。木とソース表示を切り替える。
+    fn toggle_source_view(&mut self) {
+        if self.source_mode {
+            self.source_to_tree();
+        } else {
+            self.tree_to_source();
+        }
+    }
+
+    /// 木をソース表示に変換する。
+    ///
+    /// depth:0のノード列として持たせ、既存の編集
+    /// エンジン（insert_char、undo、カーソル反転など）
+    /// をそのまま使い回す。カーソル位置は先頭に戻す。
+    fn tree_to_source(&mut self) {
+        let source = self.to_scheme();
+
+        self.nodes = source
+            .lines()
+            .map(|line| Node {
+                text: line.to_string(),
+                depth: 0,
+            })
+            .collect();
+
+        if self.nodes.is_empty() {
+            self.nodes.push(Node {
+                text: String::new(),
+                depth: 0,
+            });
+        }
+
+        self.cursor = 0;
+        self.cursor_col = 0;
+        self.source_mode = true;
+    }
+
+    /// ソース表示の各行を連結し、読み直して木に戻す。
+    ///
+    /// 壊れた括弧のまま木に戻すと表示が崩れるので、
+    /// パースに失敗したらソース表示に留まる。
+    fn source_to_tree(&mut self) {
+        let text: String = self
+            .nodes
+            .iter()
+            .map(|node| node.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let reading = match reader::read(&text) {
+            Ok(reading) => reading,
+            Err(error) => {
+                self.message = format!(
+                    "木に戻せません: {}",
+                    error
+                );
+                return;
+            }
+        };
+
+        self.nodes = nodes_from(&reading.data);
+        self.cursor = 0;
+        self.cursor_col = 0;
+        self.source_mode = false;
+    }
+
     /// ファイルを読む。読めたらtrueを返す。
     fn edit(&mut self, argument: Option<&str>) -> bool {
         if self.modified {
@@ -630,6 +682,9 @@ impl App {
         self.cursor = 0;
         self.cursor_col = 0;
         self.modified = false;
+        // ソース表示中に別ファイルを開くと食い違うので、
+        // 木の表示に戻す。
+        self.source_mode = false;
         // ファイルが入れ替わるので履歴は捨てる。
         self.undo.clear();
         self.redo.clear();
@@ -662,7 +717,17 @@ impl App {
             return false;
         };
 
-        let mut text = self.to_scheme();
+        // ソース表示中はdepth:0のフラットな行なので、
+        // to_scheme()に通さずそのまま連結する。
+        let mut text = if self.source_mode {
+            self.nodes
+                .iter()
+                .map(|node| node.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            self.to_scheme()
+        };
         text.push('\n');
 
         match fs::write(&path, text) {
@@ -854,8 +919,12 @@ impl App {
         self.record();
     }
 
+    /// ソース表示は全行depth:0のフラットな行なので、
+    /// 深さを変える操作は意味を持たない上に、上限計算
+    /// （直前ノード+1）が常に1になり簡単に罫線が
+    /// 出てきてしまう。無効にする。
     fn indent(&mut self) {
-        if self.cursor == 0 {
+        if self.source_mode || self.cursor == 0 {
             return;
         }
 
@@ -872,7 +941,9 @@ impl App {
     }
 
     fn unindent(&mut self) {
-        if self.nodes[self.cursor].depth > 0 {
+        if !self.source_mode
+            && self.nodes[self.cursor].depth > 0
+        {
             self.nodes[self.cursor].depth -= 1;
             self.record();
         }
@@ -884,7 +955,7 @@ impl App {
     /// 子孫の深さは変わらないまま親子関係が崩れる。
     /// 上限はindent()と同じ。
     fn indent_subtree(&mut self) {
-        if self.cursor == 0 {
+        if self.source_mode || self.cursor == 0 {
             return;
         }
 
@@ -909,7 +980,9 @@ impl App {
 
     /// カーソルの部分木を子孫ごと1段上げる。
     fn unindent_subtree(&mut self) {
-        if self.nodes[self.cursor].depth == 0 {
+        if self.source_mode
+            || self.nodes[self.cursor].depth == 0
+        {
             return;
         }
 
@@ -1008,9 +1081,14 @@ impl App {
             .min(self.nodes.len());
 
         if yank {
-            self.register = normalize(
-                &self.nodes[self.cursor..end],
-            );
+            let cut =
+                normalize(&self.nodes[self.cursor..end]);
+
+            if self.source_mode {
+                self.source_register = cut;
+            } else {
+                self.register = cut;
+            }
         }
 
         self.nodes.drain(self.cursor..end);
@@ -1062,21 +1140,35 @@ impl App {
         let end = (self.cursor + count)
             .min(self.nodes.len());
 
-        self.register =
+        let cut =
             normalize(&self.nodes[self.cursor..end]);
 
-        self.message = format!(
-            "{}ノードをヤンクしました",
-            self.register.len()
-        );
+        let length = cut.len();
+
+        if self.source_mode {
+            self.source_register = cut;
+        } else {
+            self.register = cut;
+        }
+
+        self.message =
+            format!("{}ノードをヤンクしました", length);
     }
 
-    /// レジスタの内容を貼る。
+    /// レジスタの内容を貼る。木とソース表示で
+    /// 別々のレジスタを使う。部分木の相対深さが
+    /// 平坦なソース表示に混ざって崩れるのを防ぐ。
     ///
     /// 根をカーソルと同じ深さに置くので、
     /// 深さが飛ぶことはない。
     fn paste(&mut self, before: bool, count: usize) {
-        if self.register.is_empty() {
+        let register = if self.source_mode {
+            self.source_register.clone()
+        } else {
+            self.register.clone()
+        };
+
+        if register.is_empty() {
             self.message =
                 "何もヤンクしていません".to_string();
             return;
@@ -1103,7 +1195,7 @@ impl App {
         let mut block = Vec::new();
 
         for _ in 0..count {
-            for node in &self.register {
+            for node in &register {
                 block.push(Node {
                     text: node.text.clone(),
                     depth: node.depth + depth,
@@ -1136,7 +1228,11 @@ impl App {
 
             let text = &self.nodes[index].text;
 
-            let display = if text.is_empty() {
+            // ソース表示では空行はそのまま空行。
+            // ◦への置き換えは木の表示だけの都合。
+            let display = if text.is_empty()
+                && !self.source_mode
+            {
                 "◦"
             } else {
                 text
@@ -1165,8 +1261,10 @@ impl App {
 
         // draw()を通す前（テストなど）はwidthが0のまま
         // なので、無制限として扱う。height==0のときの
-        // follow_cursor()と同じ考え方。
-        let width = if self.width == 0 {
+        // follow_cursor()と同じ考え方。ソース表示は
+        // 折り返すので、そもそも横スクロールしない。
+        let width = if self.width == 0 || self.source_mode
+        {
             usize::MAX
         } else {
             self.width
@@ -1611,7 +1709,7 @@ impl App {
             self.height.saturating_sub(2).max(1) as isize;
         match code {
             KeyCode::F(2) => {
-                self.source_mode = !self.source_mode
+                self.toggle_source_view()
             }
             // tmuxがCtrl-Bをプレフィックスに使うので、
             // 素通りするキーも用意しておく。
@@ -1850,6 +1948,11 @@ impl App {
     fn handle_insert(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => self.mode = Mode::Normal,
+            // ソース表示では罫線ではなく空白を入れる。
+            KeyCode::Tab if self.source_mode => {
+                self.insert_char(' ');
+                self.insert_char(' ');
+            }
             KeyCode::Tab => self.indent(),
             KeyCode::BackTab => self.unindent(),
             KeyCode::Enter => self.enter(),
@@ -1895,44 +1998,19 @@ fn draw(
         .saturating_sub(2)
         .saturating_sub(gutter);
 
-    let text: Text = if app.source_mode {
-        let source = app.to_scheme();
-        app.source_lines = source.lines().count();
-        let width = number_width(app.source_lines);
-        // 短くなっていれば行き過ぎを戻す。
-        app.source_scroll = app.source_scroll.min(
-            app.source_lines
-                .saturating_sub(app.height),
-        );
-        if app.number {
-            source
-                .lines()
-                .enumerate()
-                .map(|(index, line)| {
-                    Line::from(vec![
-                        number_span(index + 1, width),
-                        Span::raw(line.to_string()),
-                    ])
-                })
-                .collect::<Vec<Line>>()
-                .into()
-        } else {
-            source.into()
-        }
-    } else {
-        app.follow_cursor();
+    // ソース表示も木と同じ App::nodes/cursor を使う
+    // （F2でdepth:0の行に変換してある）ので、
+    // カーソル追従・行番号・カーソル反転は共通。
+    // 横スクロールだけソース表示では不要（折り返す）。
+    app.follow_cursor();
+    if !app.source_mode {
         app.follow_cursor_horizontal();
-        app.tree_display().into()
-    };
+    }
 
-    let scroll = if app.source_mode {
-        app.source_scroll
-    } else {
-        app.scroll
-    };
+    let text: Text = app.tree_display().into();
 
     let mut paragraph = Paragraph::new(text)
-        .scroll((scroll as u16, 0));
+        .scroll((app.scroll as u16, 0));
 
     // ソース表示は折り返す。カーソル行という概念が
     // 無いので、木の表示のような横スクロールは
@@ -1972,14 +2050,12 @@ fn title(app: &App) -> String {
 
     let mark = if app.modified { " [+]" } else { "" };
 
-    let mode = if app.source_mode {
-        "Scheme"
-    } else {
-        match app.mode {
-            Mode::Normal => "NORMAL",
-            Mode::Insert => "INSERT",
-            Mode::Command => "COMMAND",
-        }
+    // ソース表示中も編集モードを出す。中身を見れば
+    // ソース表示かどうかは分かるので、そこは出さない。
+    let mode = match app.mode {
+        Mode::Normal => "NORMAL",
+        Mode::Insert => "INSERT",
+        Mode::Command => "COMMAND",
     };
 
     format!(" {}{} - {} ", name, mark, mode)
@@ -2834,20 +2910,6 @@ mod tests {
             page(&mut app, 'f');
         }
         assert_eq!(app.cursor, 19);
-        // ソース表示では画面だけ動く。
-        app.source_mode = true;
-        app.source_lines = 40;
-        let before = app.cursor;
-        page(&mut app, 'f');
-        assert_eq!(app.source_scroll, 3);
-        assert_eq!(app.cursor, before);
-        page(&mut app, 'b');
-        assert_eq!(app.source_scroll, 0);
-        // 行数を超えて送らない。
-        for _ in 0..20 {
-            page(&mut app, 'f');
-        }
-        assert_eq!(app.source_scroll, 35);
     }
 
     /// 実際に描画して画面に見える行を返す。
@@ -2932,16 +2994,11 @@ mod tests {
             press(&mut app, "j");
         }
         assert_eq!(top(&mut terminal, &mut app), "1");
-        // ソース表示は画面だけ動く。
-        //
-        // source_linesは描画時に入るので、
-        // F2の直後に1度描いてから送る。
-        app.source_mode = true;
+        // ソース表示も同じ仕組みで送れる。
+        app.toggle_source_view();
         screen(&mut terminal, &mut app);
-        let before = app.cursor;
         ctrl(&mut app, 'f');
-        assert_eq!(app.source_scroll, 5);
-        assert_eq!(app.cursor, before);
+        assert!(app.scroll > 0);
     }
 
     /// PageUp / PageDown。
@@ -3029,7 +3086,7 @@ mod tests {
         press(&mut app, ":set\n");
         assert_eq!(app.message, "設定項目がありません");
         // ソース表示は出力の行番号。
-        app.source_mode = true;
+        app.toggle_source_view();
         assert_eq!(
             screen(&mut terminal, &mut app),
             vec!["  1 (f a b)"]
@@ -3081,13 +3138,10 @@ mod tests {
         // 行数を超えたら末尾で止まる。
         press(&mut app, ":1\n:999\n");
         assert_eq!(app.cursor, 19);
-        // ソース表示ではその行を最上部に出す。
-        app.source_mode = true;
-        screen(&mut terminal, &mut app);
-        let before = app.cursor;
+        // ソース表示でも同じくノードへ移動する。
+        app.toggle_source_view();
         press(&mut app, ":10\n");
-        assert_eq!(app.source_scroll, 9);
-        assert_eq!(app.cursor, before);
+        assert_eq!(app.cursor, 9);
     }
 
     /// Y と D は部分木ごと。
@@ -3447,7 +3501,7 @@ mod tests {
             "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
         );
         press(&mut app, "\x1b");
-        app.source_mode = true;
+        app.toggle_source_view();
         let lines = screen(&mut terminal, &mut app);
         // 折り返されて複数行になり、全文字が残る。
         assert!(lines.len() > 1);
@@ -3474,18 +3528,6 @@ mod tests {
         assert_eq!(app.cursor_col, 3);
     }
 
-
-    #[test]
-    fn probe_quote_shapes() {
-        for text in ["'x", "'(x)", "'(a b)", "'(1 2 3)"] {
-            let reading = reader::read(text).unwrap();
-            let mut app = App::new();
-            app.nodes = nodes_from(&reading.data);
-            println!("=== {} ===", text);
-            println!("{}", app.tree_lines().join("\n"));
-            println!("-> {}", app.to_scheme());
-        }
-    }
 
     /// M は画面に見えている範囲の中央へ移動する。
     #[test]
@@ -3552,5 +3594,142 @@ mod tests {
         assert_eq!(app.to_scheme(), "(z a)");
         press(&mut app, "p");
         assert_eq!(app.to_scheme(), "(z a ())");
+    }
+
+    /// F2でソース表示を編集できる。
+    ///
+    /// 木をdepth:0の行に変換し、既存の編集エンジンを
+    /// 使い回す。編集後にF2で戻すと読み直して木になる。
+    #[test]
+    fn edit_in_source_view() {
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+
+        app.toggle_source_view();
+        assert!(app.source_mode);
+        assert_eq!(
+            app.nodes
+                .iter()
+                .map(|n| n.text.clone())
+                .collect::<Vec<_>>(),
+            vec!["(f a b)".to_string()]
+        );
+        assert_eq!(app.mode, Mode::Normal);
+
+        // 行の途中に別の要素を書き足す。
+        press(&mut app, "A c\x1b");
+        assert_eq!(app.nodes[0].text, "(f a b) c");
+
+        // F2で木に戻すと再パースされる。
+        app.toggle_source_view();
+        assert!(!app.source_mode);
+        assert_eq!(app.to_scheme(), "(f a b)\n\nc");
+    }
+
+    /// 壊れた括弧のまま木には戻れない。
+    #[test]
+    fn source_view_parse_error_stays() {
+        let mut app = insert("(a b)");
+        press(&mut app, "\x1b");
+        app.toggle_source_view();
+        press(&mut app, "A (\x1b");
+        app.toggle_source_view();
+        assert!(app.source_mode);
+        assert!(app.message.contains("木に戻せません"));
+    }
+
+    /// ソース表示の空行は◦にならない。
+    #[test]
+    fn source_view_blank_lines_stay_blank() {
+        let mut app = insert("a");
+        press(&mut app, "\x1b");
+        press(&mut app, "obcd\x1b");
+        assert_eq!(app.to_scheme(), "a\n\nbcd");
+        app.toggle_source_view();
+        assert_eq!(
+            app.tree_lines(),
+            vec!["a", "", "bcd"]
+        );
+    }
+
+    /// ソース表示のTabは罫線ではなく空白を入れる。
+    #[test]
+    fn source_view_tab_inserts_spaces() {
+        let mut app = insert("f");
+        press(&mut app, "\x1b");
+        app.toggle_source_view();
+        press(&mut app, "A\tx\x1b");
+        assert_eq!(app.nodes[0].text, "f  x");
+        assert_eq!(app.nodes[0].depth, 0);
+        assert_eq!(app.tree_lines(), vec!["f  x"]);
+    }
+
+    /// 木とソース表示でヤンクのレジスタは別。
+    #[test]
+    fn source_view_has_its_own_register() {
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        press(&mut app, "ggyy");
+        assert_eq!(app.register.len(), 1);
+
+        app.toggle_source_view();
+        assert!(app.source_register.is_empty());
+
+        press(&mut app, "ggyy");
+        assert_eq!(app.source_register.len(), 1);
+        assert!(app.register.len() == 1);
+
+        // 貼り付けは今のモードのレジスタだけを見る。
+        press(&mut app, "p");
+        assert_eq!(
+            app.nodes[1].text,
+            app.nodes[0].text
+        );
+    }
+
+    /// タイトルは常に編集モードを出す。ソース表示か
+    /// どうかは中身を見れば分かるので出さない。
+    #[test]
+    fn title_shows_edit_mode_in_source_view() {
+        let mut app = insert("f");
+        press(&mut app, "\x1b");
+        app.toggle_source_view();
+        assert!(title(&app).contains("NORMAL"));
+        assert!(!title(&app).contains("Scheme"));
+        press(&mut app, "i");
+        assert!(title(&app).contains("INSERT"));
+    }
+
+    /// undoは共有される。F2の切り替え自体は1段として
+    /// 積まないが、Snapshotがsource_modeも一緒に控える
+    /// ので、記録されている編集を遡って木の時点まで
+    /// 戻ると表示モードも正しく木に戻る。
+    #[test]
+    fn undo_crosses_source_view_toggle() {
+        // "a"の入力はtree_modeで記録される1段。
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a)");
+
+        app.toggle_source_view();
+        assert!(app.source_mode);
+
+        // ソース表示での追記もう1段。
+        press(&mut app, "ob\x1b");
+        assert_eq!(app.nodes.len(), 2);
+
+        // 1回目のuはソース表示中の編集を戻すだけ。
+        // 切り替え自体は記録していないので、
+        // まだソース表示のまま。
+        press(&mut app, "u");
+        assert!(app.source_mode);
+        assert_eq!(app.nodes.len(), 1);
+
+        // さらに戻ると、木を作っていた時点の
+        // スナップショットに達し、表示モードも
+        // 一緒に木へ戻る。
+        press(&mut app, "u");
+        assert!(!app.source_mode);
     }
 }
