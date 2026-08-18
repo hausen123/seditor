@@ -1818,6 +1818,19 @@ impl App {
                 };
                 self.move_to(index);
             }
+            'M' => {
+                // 画面に見えている範囲の中央へ。
+                // draw()を通す前はheightが0なので、
+                // 代わりに全体の中央へ寄せる。
+                let index = if self.height == 0 {
+                    self.nodes.len() / 2
+                } else {
+                    self.scroll + self.height / 2
+                };
+                self.move_to(
+                    index.min(self.nodes.len() - 1),
+                );
+            }
             ':' => {
                 self.command.clear();
                 self.message.clear();
@@ -3465,5 +3478,37 @@ mod tests {
             println!("{}", app.tree_lines().join("\n"));
             println!("-> {}", app.to_scheme());
         }
+    }
+
+    /// M は画面に見えている範囲の中央へ移動する。
+    #[test]
+    fn middle_of_screen() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..20 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1bgg");
+        // 高さ7の画面で先頭から。中央はindex3。
+        screen(&mut terminal, &mut app);
+        assert_eq!(app.height, 7);
+        press(&mut app, "M");
+        assert_eq!(app.cursor, 3);
+        // 1画面送ってから中央へ。
+        press(&mut app, "\x1bgg");
+        screen(&mut terminal, &mut app);
+        press(&mut app, "\x06");
+        screen(&mut terminal, &mut app);
+        press(&mut app, "M");
+        assert_eq!(app.cursor, app.scroll + app.height / 2);
+        // draw()を通す前はheightが0なので、
+        // 全体の中央へ寄せる。
+        let mut app = insert("a\nb\nc");
+        press(&mut app, "\x1bggM");
+        assert_eq!(app.cursor, 1);
     }
 }
