@@ -711,9 +711,10 @@ impl App {
     ///
     /// ◦ には消す文字が無いので、ddと同じく
     /// ノードごと消して子を1段持ち上げる。
-    fn delete_char(&mut self) {
+    /// yankはNormalモードのxのときだけtrue。
+    fn delete_char(&mut self, yank: bool) {
         if self.text().is_empty() {
-            self.delete_node(1);
+            self.delete_node(1, yank);
             return;
         }
 
@@ -761,10 +762,11 @@ impl App {
     ///
     /// ◦ の上ではノードごと消して、前のノードの
     /// 末尾に戻る。Enterを取り消す動きになる。
+    /// レジスタは汚さない。
     fn backspace(&mut self) {
         if self.text().is_empty() {
             if self.cursor == 0 {
-                self.delete_node(1);
+                self.delete_node(1, false);
                 self.cursor_col = 0;
                 return;
             }
@@ -774,7 +776,7 @@ impl App {
             // 位置から前のノードを決めておく。
             let previous = self.cursor - 1;
 
-            self.delete_node(1);
+            self.delete_node(1, false);
 
             self.cursor = previous;
             self.cursor_col = self.text().len();
@@ -998,14 +1000,18 @@ impl App {
 
     /// カーソルから count 個のノードを消す。
     ///
-    /// 消したぶんはレジスタに入る。子は
-    /// 深さの復元によって持ち上がる。
-    fn delete_node(&mut self, count: usize) {
+    /// yankがtrueなら消したぶんをレジスタに入れる。
+    /// Backspace/Deleteはレジスタを汚さないよう
+    /// falseで呼ぶ。子は深さの復元によって持ち上がる。
+    fn delete_node(&mut self, count: usize, yank: bool) {
         let end = (self.cursor + count)
             .min(self.nodes.len());
 
-        self.register =
-            normalize(&self.nodes[self.cursor..end]);
+        if yank {
+            self.register = normalize(
+                &self.nodes[self.cursor..end],
+            );
+        }
 
         self.nodes.drain(self.cursor..end);
 
@@ -1663,13 +1669,14 @@ impl App {
                 self.unindent_subtree();
                 return;
             }
-            // xと同じ。カーソル位置の1文字を消す。
+            // xと同じく1文字消すが、レジスタは
+            // 汚さない。
             KeyCode::Delete => {
                 let count =
                     self.count.take().unwrap_or(1);
                 self.begin_edit();
                 for _ in 0..count {
-                    self.delete_char();
+                    self.delete_char(false);
                 }
                 return;
             }
@@ -1723,7 +1730,7 @@ impl App {
             match (first, c) {
                 ('d', 'd') => {
                     self.begin_edit();
-                    self.delete_node(count);
+                    self.delete_node(count, true);
                 }
                 ('y', 'y') => self.yank(count),
                 ('>', '>') => {
@@ -1772,7 +1779,7 @@ impl App {
             'x' => {
                 self.begin_edit();
                 for _ in 0..count {
-                    self.delete_char();
+                    self.delete_char(true);
                 }
             }
             'p' => {
@@ -1791,7 +1798,7 @@ impl App {
             'D' => {
                 let length = self.subtree_len();
                 self.begin_edit();
-                self.delete_node(length);
+                self.delete_node(length, true);
             }
             'u' => self.undo(),
             'h' => {
@@ -1847,7 +1854,7 @@ impl App {
             KeyCode::BackTab => self.unindent(),
             KeyCode::Enter => self.enter(),
             KeyCode::Backspace => self.backspace(),
-            KeyCode::Delete => self.delete_char(),
+            KeyCode::Delete => self.delete_char(false),
             KeyCode::Home => self.cursor_col = 0,
             KeyCode::End => {
                 self.cursor_col = self.text().len()
@@ -3510,5 +3517,40 @@ mod tests {
         let mut app = insert("a\nb\nc");
         press(&mut app, "\x1bggM");
         assert_eq!(app.cursor, 1);
+    }
+
+    /// Backspace/Deleteは◦をノードごと消しても
+    /// レジスタを汚さない。xは従来通りレジスタに入る。
+    #[test]
+    fn backspace_delete_do_not_yank() {
+        // 先にyyでレジスタに何か入れておく。
+        let mut app = insert("z\n\ta\n");
+        press(&mut app, "\x1bggyy");
+        assert_eq!(app.register.len(), 1);
+        assert_eq!(app.to_scheme(), "(z a ())");
+        // 末尾の ◦ を Delete で消す。
+        press(&mut app, "G");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.to_scheme(), "(z a)");
+        // レジスタはyyのときのまま変わらない。
+        press(&mut app, "p");
+        assert_eq!(app.to_scheme(), "(z a z)");
+        // 挿入モードのBackspaceも同様。
+        let mut app = insert("z\n\ta\n\t");
+        press(&mut app, "\x1bggyy");
+        assert_eq!(app.to_scheme(), "(z (a ()))");
+        press(&mut app, "Gi\x7f");
+        assert_eq!(app.to_scheme(), "(z a)");
+        press(&mut app, "\x1bp");
+        assert_eq!(app.to_scheme(), "(z a z)");
+        // x は今まで通りレジスタに積む。
+        let mut app = insert("z\n\ta\n");
+        press(&mut app, "\x1bggyyGx");
+        assert_eq!(app.to_scheme(), "(z a)");
+        press(&mut app, "p");
+        assert_eq!(app.to_scheme(), "(z a ())");
     }
 }
