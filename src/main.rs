@@ -32,6 +32,7 @@ use ratatui::{
         Block,
         Borders,
         Paragraph,
+        Wrap,
     },
 };
 
@@ -231,10 +232,18 @@ struct App {
     number: bool,
     /// 画面最上部の行番号。
     scroll: usize,
+    /// 木の表示の横スクロール位置（列数）。
+    ///
+    /// 行番号ガターは対象外で、全行共通の1本。
+    /// 行ごとに別々にすると罫線がずれる。
+    h_scroll: usize,
     /// ソース表示のスクロール位置。
     source_scroll: usize,
     /// 枠の内側の行数。描画時に入る。
     height: usize,
+    /// 木の表示でガターを除いた横の文字数。
+    /// 描画時に入る。
+    width: usize,
     /// ソース表示の行数。描画時に入る。
     source_lines: usize,
     /// 編集の区切りで取った控え。
@@ -269,8 +278,10 @@ impl App {
             count: None,
             number: false,
             scroll: 0,
+            h_scroll: 0,
             source_scroll: 0,
             height: 0,
+            width: 0,
             source_lines: 0,
             held: None,
         }
@@ -293,6 +304,49 @@ impl App {
         {
             self.scroll =
                 self.cursor - self.height + 1;
+        }
+    }
+
+    /// カーソルの画面上の桁を数える。
+    ///
+    /// プレフィクスと、カーソルより手前のテキストを
+    /// 文字数で数える。桁の単位はここでは文字数とし、
+    /// 全角文字の幅は数えない（他の桁計算と同じ簡略化）。
+    fn cursor_column(&self, index: usize) -> usize {
+        let prefix =
+            self.tree_prefix(index).chars().count();
+
+        let text = &self.nodes[index].text;
+
+        let column = if text.is_empty() {
+            0
+        } else {
+            self.cursor_col
+        };
+
+        prefix + text[..column].chars().count()
+    }
+
+    /// カーソルの桁が画面に入るよう、横方向も
+    /// 最小限だけ動かす。follow_cursor()の横版。
+    ///
+    /// 見切れの印は左右で最大2列を食うので、その分を
+    /// 差し引いた幅で判定する。そのまま width を使うと、
+    /// 印を出したときにカーソルがちょうど印の裏に
+    /// 隠れることがある。
+    fn follow_cursor_horizontal(&mut self) {
+        if self.width == 0 {
+            return;
+        }
+
+        let visible = self.width.saturating_sub(2).max(1);
+
+        let column = self.cursor_column(self.cursor);
+
+        if column < self.h_scroll {
+            self.h_scroll = column;
+        } else if column >= self.h_scroll + visible {
+            self.h_scroll = column - visible + 1;
         }
     }
 
@@ -1088,56 +1142,105 @@ impl App {
         lines
     }
 
-    /// 描画用の行。カーソルの1セルを反転させる。
+    /// 描画用の行。カーソルの1セルを反転させ、
+    /// h_scrollとwidthに合わせて横に切り詰める。
     ///
-    /// 記号を挿し込むと桁がずれるので、
-    /// 文字数を変えずに見せる。
+    /// カーソルの記号を挿し込むと桁がずれるので、
+    /// 文字数を変えずに見せる。見切れた行には
+    /// 端に印を出す（vimのnowrap + listcharsに近い）。
     fn tree_display(&self) -> Vec<Line<'static>> {
         let highlight = Style::default()
             .add_modifier(Modifier::REVERSED);
 
-        let width = number_width(self.nodes.len());
+        let dim = Style::default()
+            .add_modifier(Modifier::DIM);
+
+        let gutter_width = number_width(self.nodes.len());
+
+        // draw()を通す前（テストなど）はwidthが0のまま
+        // なので、無制限として扱う。height==0のときの
+        // follow_cursor()と同じ考え方。
+        let width = if self.width == 0 {
+            usize::MAX
+        } else {
+            self.width
+        };
 
         self.tree_lines()
             .into_iter()
             .enumerate()
             .map(|(index, line)| {
                 // 行番号は独立したSpanにする。
-                // 本文に混ぜるとカーソルの位置が
-                // 桁のぶんずれる。
+                // 本文に混ぜるとカーソルの位置や
+                // 横スクロールの桁がずれる。
                 let mut spans = Vec::new();
                 if self.number {
                     spans.push(number_span(
                         index + 1,
-                        width,
+                        gutter_width,
                     ));
                 }
-                if index != self.cursor {
-                    spans.push(Span::raw(line));
-                    return Line::from(spans);
+
+                let chars: Vec<char> =
+                    line.chars().collect();
+
+                // カーソル行だけ、反転させる文字位置を
+                // 求める。行末より右なら仮想の空白を
+                // 1つ足した位置になる。
+                let cursor_at = (index == self.cursor)
+                    .then(|| self.cursor_column(index));
+
+                let total = match cursor_at {
+                    Some(at) if at >= chars.len() => {
+                        at + 1
+                    }
+                    _ => chars.len(),
+                };
+
+                let left_more =
+                    self.h_scroll > 0 && total > 0;
+
+                let budget = width
+                    .saturating_sub(left_more as usize);
+
+                let start = self.h_scroll.min(total);
+                let mut end = start
+                    .saturating_add(budget)
+                    .min(total);
+
+                let right_more = end < total;
+
+                if right_more && end > start {
+                    end -= 1;
                 }
-                // 空ノードは◦の上にカーソルを置く。
-                let text = &self.nodes[index].text;
-                let column = if text.is_empty() {
-                    0
-                } else {
-                    self.cursor_col
-                };
-                let split =
-                    self.tree_prefix(index).len() + column;
-                let (left, rest) = line.split_at(split);
-                let mut chars = rest.chars();
-                // 行末より右にいるときは空白を反転させる。
-                let (cell, right) = match chars.next() {
-                    Some(c) => (
+
+                if left_more {
+                    spans.push(Span::styled("‹", dim));
+                }
+
+                for i in start..end {
+                    let c = chars
+                        .get(i)
+                        .copied()
+                        .unwrap_or(' ');
+
+                    let style =
+                        if cursor_at == Some(i) {
+                            highlight
+                        } else {
+                            Style::default()
+                        };
+
+                    spans.push(Span::styled(
                         c.to_string(),
-                        chars.as_str().to_string(),
-                    ),
-                    None => (" ".to_string(), String::new()),
-                };
-                spans.push(Span::raw(left.to_string()));
-                spans.push(Span::styled(cell, highlight));
-                spans.push(Span::raw(right));
+                        style,
+                    ));
+                }
+
+                if right_more {
+                    spans.push(Span::styled("›", dim));
+                }
+
                 Line::from(spans)
             })
             .collect()
@@ -1570,6 +1673,15 @@ impl App {
                 }
                 return;
             }
+            // 0 と $ と同じ。
+            KeyCode::Home => {
+                self.cursor_col = 0;
+                return;
+            }
+            KeyCode::End => {
+                self.cursor_col = self.text().len();
+                return;
+            }
             _ => {}
         }
 
@@ -1753,6 +1865,16 @@ fn draw(
     app.height =
         areas[0].height.saturating_sub(2) as usize;
 
+    // 枠と行番号ガターを除いた横の文字数。
+    let gutter = if app.number {
+        number_width(app.nodes.len())
+    } else {
+        0
+    };
+    app.width = (areas[0].width as usize)
+        .saturating_sub(2)
+        .saturating_sub(gutter);
+
     let text: Text = if app.source_mode {
         let source = app.to_scheme();
         app.source_lines = source.lines().count();
@@ -1779,6 +1901,7 @@ fn draw(
         }
     } else {
         app.follow_cursor();
+        app.follow_cursor_horizontal();
         app.tree_display().into()
     };
 
@@ -1788,8 +1911,18 @@ fn draw(
         app.scroll
     };
 
-    let paragraph = Paragraph::new(text)
-        .scroll((scroll as u16, 0))
+    let mut paragraph = Paragraph::new(text)
+        .scroll((scroll as u16, 0));
+
+    // ソース表示は折り返す。カーソル行という概念が
+    // 無いので、木の表示のような横スクロールは
+    // 持ち込まず素直に折り返せる。
+    if app.source_mode {
+        paragraph = paragraph
+            .wrap(Wrap { trim: false });
+    }
+
+    let paragraph = paragraph
         .block(
             Block::default()
                 .title(title(app))
@@ -2179,8 +2312,18 @@ mod tests {
     #[test]
     fn cursor_cell() {
         // 反転しているセルの中身。
+        //
+        // ガターや見切れの印が増えると位置が動くので、
+        // 固定indexではなくスタイルで探す。
         fn cell(app: &App) -> String {
-            app.tree_display()[app.cursor].spans[1]
+            app.tree_display()[app.cursor]
+                .spans
+                .iter()
+                .find(|span| {
+                    span.style.add_modifier
+                        .contains(Modifier::REVERSED)
+                })
+                .expect("カーソルのセルが見つかりません")
                 .content
                 .to_string()
         }
@@ -3218,5 +3361,109 @@ mod tests {
         ));
         press(&mut app, "d");
         assert_eq!(app.to_scheme(), "(f a)");
+    }
+
+    /// 木の表示は折り返さず、右端を超えた行は
+    /// 見切れた印を出しながら横スクロールする。
+    #[test]
+    fn horizontal_scroll() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(15, 6),
+        )
+        .unwrap();
+        let mut app = insert(
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
+        );
+        press(&mut app, "\x1b0");
+        // widthはdraw()を通すまで分からない。
+        // 幅13（枠2を引いた分）に収まる範囲だけ見え、
+        // 右に続きがあることを › で示す。
+        assert_eq!(
+            screen(&mut terminal, &mut app)[0],
+            "0123456789AB›"
+        );
+        assert_eq!(app.width, 13);
+        assert_eq!(app.h_scroll, 0);
+        // 行末までカーソルを進めると左が見切れ、
+        // ‹ が出る。カーソル（行末の仮想空白）は
+        // 印の裏に隠れず必ず見える範囲に入る。
+        // h_scrollはdraw()の中で決まるので、
+        // 確認の前に必ずscreen()で描画する。
+        press(&mut app, "$");
+        let line = screen(&mut terminal, &mut app)[0].clone();
+        assert_eq!(app.h_scroll, 30);
+        assert!(line.starts_with('‹'));
+        assert!(line.ends_with('d'));
+        // 中ほどに戻ると両端に印が出て、カーソルの
+        // 文字も欠けずに見える。
+        press(&mut app, "020l");
+        assert_eq!(
+            screen(&mut terminal, &mut app)[0],
+            "‹KLMNOPQRSTU›"
+        );
+        assert_eq!(app.h_scroll, 20);
+        // 短い行では画面に収まるので印は出ない。
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1b");
+        assert_eq!(
+            screen(&mut terminal, &mut app)
+                .into_iter()
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec!["f", "└── a"]
+        );
+    }
+
+    /// ソース表示（F2）は折り返す。カーソル行という
+    /// 概念が無いので横スクロールは持ち込まない。
+    #[test]
+    fn source_view_wraps() {
+        // 折り返した全行が収まるだけの高さを取る。
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(15, 12),
+        )
+        .unwrap();
+        let mut app = insert(
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
+        );
+        press(&mut app, "\x1b");
+        app.source_mode = true;
+        let lines = screen(&mut terminal, &mut app);
+        // 折り返されて複数行になり、全文字が残る。
+        assert!(lines.len() > 1);
+        assert_eq!(
+            lines.concat(),
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd"
+        );
+    }
+
+    /// NormalモードのHome/Endは0と$と同じ。
+    #[test]
+    fn home_end_in_normal_mode() {
+        let mut app = insert("abc");
+        press(&mut app, "\x1b");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.cursor_col, 0);
+        app.handle_key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.cursor_col, 3);
+    }
+
+
+    #[test]
+    fn probe_quote_shapes() {
+        for text in ["'x", "'(x)", "'(a b)", "'(1 2 3)"] {
+            let reading = reader::read(text).unwrap();
+            let mut app = App::new();
+            app.nodes = nodes_from(&reading.data);
+            println!("=== {} ===", text);
+            println!("{}", app.tree_lines().join("\n"));
+            println!("-> {}", app.to_scheme());
+        }
     }
 }
