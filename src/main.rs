@@ -580,9 +580,43 @@ impl App {
     ///
     /// depth:0のノード列として持たせ、既存の編集
     /// エンジン（insert_char、undo、カーソル反転など）
-    /// をそのまま使い回す。カーソル位置は先頭に戻す。
+    /// をそのまま使い回す。カーソルは、印字したときに
+    /// 元のノードが始まった行・桁に合わせる。
     fn tree_to_source(&mut self) {
-        let source = self.to_scheme();
+        let (source, positions) =
+            self.to_scheme_with_positions();
+
+        let (line, start) =
+            Self::position_of(self.cursor, &positions);
+
+        // position_ofが返すのはノードの印字が始まる桁。
+        // ノードの中でのカーソルの位置も足す。畳んだ親に
+        // 落ちたとき（cursorが自分のノードでないとき）は
+        // 意味が無いので足さない。
+        //
+        // 子を持つ（または◦の）ノードは開き括弧が
+        // 先頭に付くので、テキスト自体はその1文字後ろ
+        // から始まる。
+        let column = if positions[self.cursor].is_some() {
+            let text = &self.nodes[self.cursor].text;
+            let has_paren = !self.is_marker(self.cursor)
+                && (!self.children(self.cursor).is_empty()
+                    || text.trim().is_empty());
+            let paren = if has_paren
+                && !text.trim().is_empty()
+            {
+                1
+            } else {
+                0
+            };
+            start
+                + paren
+                + text[..self.cursor_col]
+                    .chars()
+                    .count()
+        } else {
+            start
+        };
 
         self.nodes = source
             .lines()
@@ -599,15 +633,28 @@ impl App {
             });
         }
 
-        self.cursor = 0;
-        self.cursor_col = 0;
+        self.cursor =
+            line.min(self.nodes.len() - 1);
+
+        // columnは文字数。cursor_colはバイト位置で
+        // 扱っているので変換する。
+        let text = &self.nodes[self.cursor].text;
+
+        self.cursor_col = text
+            .char_indices()
+            .nth(column)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+
         self.source_mode = true;
     }
 
     /// ソース表示の各行を連結し、読み直して木に戻す。
     ///
     /// 壊れた括弧のまま木に戻すと表示が崩れるので、
-    /// パースに失敗したらソース表示に留まる。
+    /// パースに失敗したらソース表示に留まる。カーソルは
+    /// 今いた行以下で一番近いノードに合わせる。桁までは
+    /// 対応しない（1行に複数ノードが同居しうるため）。
     fn source_to_tree(&mut self) {
         let text: String = self
             .nodes
@@ -615,6 +662,8 @@ impl App {
             .map(|node| node.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+
+        let line = self.cursor;
 
         let reading = match reader::read(&text) {
             Ok(reading) => reading,
@@ -628,7 +677,11 @@ impl App {
         };
 
         self.nodes = nodes_from(&reading.data);
-        self.cursor = 0;
+
+        let (_, positions) =
+            self.to_scheme_with_positions();
+
+        self.cursor = Self::node_at_line(&positions, line);
         self.cursor_col = 0;
         self.source_mode = false;
     }
@@ -1448,7 +1501,23 @@ impl App {
     ///
     /// にする。
     fn to_scheme(&self) -> String {
+        self.to_scheme_with_positions().0
+    }
+
+    /// to_scheme()に加えて、ノードごとの出力上の
+    /// (行, 桁)も返す。桁は文字数（current_columnと
+    /// 同じ簡略化）。
+    ///
+    /// 兄弟ごと1行に畳まれた子は、畳んだ親の位置に
+    /// 埋もれて記録されない。木とソース表示を
+    /// 切り替えるとき、カーソルの対応する位置を
+    /// 探すのに使う。
+    fn to_scheme_with_positions(
+        &self,
+    ) -> (String, Vec<Option<(usize, usize)>>) {
         let mut output = String::new();
+        let mut positions = vec![None; self.nodes.len()];
+
         for index in 0..self.nodes.len() {
             if self.nodes[index].depth != 0 {
                 continue;
@@ -1456,9 +1525,61 @@ impl App {
             if !output.is_empty() {
                 output.push_str("\n\n");
             }
-            self.write_pretty(index, &mut output);
+            self.write_pretty(
+                index,
+                &mut output,
+                &mut positions,
+            );
         }
-        output
+
+        (output, positions)
+    }
+
+    /// indexの位置。記録が無ければ、畳んだ親を
+    /// 見つかるまで手前へ探す。
+    fn position_of(
+        index: usize,
+        positions: &[Option<(usize, usize)>],
+    ) -> (usize, usize) {
+        let mut i = index;
+
+        loop {
+            if let Some(position) = positions[i] {
+                return position;
+            }
+
+            if i == 0 {
+                return (0, 0);
+            }
+
+            i -= 1;
+        }
+    }
+
+    /// 記録の中から、target行以下で一番近いノードを
+    /// 探す。ソース表示の行番号から、対応する木の
+    /// ノードへ戻るときに使う。
+    fn node_at_line(
+        positions: &[Option<(usize, usize)>],
+        target: usize,
+    ) -> usize {
+        let mut best = 0;
+        let mut best_line = 0;
+
+        for (index, position) in
+            positions.iter().enumerate()
+        {
+            let Some((line, _)) = position else {
+                continue;
+            };
+
+            if *line <= target && *line >= best_line {
+                best_line = *line;
+                best = index;
+            }
+        }
+
+        best
     }
 
     /// indexの直接の子を列挙する。
@@ -1556,17 +1677,26 @@ impl App {
     ///
     /// 開始桁はoutputの末尾から求めるので、
     /// 呼ぶ側は字下げの空白を書いてから渡すこと。
+    /// positionsにindexの開始位置を記録する。
     fn write_pretty(
         &self,
         index: usize,
         output: &mut String,
+        positions: &mut Vec<Option<(usize, usize)>>,
     ) {
         let indent = current_column(output);
+        let line = output.matches('\n').count();
+        positions[index] = Some((line, indent));
+
         let text = self.nodes[index].text.trim();
         let children = self.children(index);
         if self.is_marker(index) {
             output.push_str(text);
-            self.write_pretty(children[0], output);
+            self.write_pretty(
+                children[0],
+                output,
+                positions,
+            );
             return;
         }
         let flat = self.flat(index);
@@ -1587,12 +1717,15 @@ impl App {
                 let count = count.min(children.len());
                 for &child in &children[..count] {
                     output.push(' ');
-                    self.write_pretty(child, output);
+                    self.write_pretty(
+                        child, output, positions,
+                    );
                 }
                 self.write_children(
                     &children[count..],
                     indent + 2,
                     output,
+                    positions,
                 );
             }
             Indent::Align => {
@@ -1600,11 +1733,14 @@ impl App {
                     output.push(' ');
                 }
                 let column = current_column(output);
-                self.write_pretty(children[0], output);
+                self.write_pretty(
+                    children[0], output, positions,
+                );
                 self.write_children(
                     &children[1..],
                     column,
                     output,
+                    positions,
                 );
             }
         }
@@ -1617,11 +1753,12 @@ impl App {
         children: &[usize],
         column: usize,
         output: &mut String,
+        positions: &mut Vec<Option<(usize, usize)>>,
     ) {
         for &child in children {
             output.push('\n');
             output.push_str(&" ".repeat(column));
-            self.write_pretty(child, output);
+            self.write_pretty(child, output, positions);
         }
     }
 
@@ -3732,4 +3869,83 @@ mod tests {
         press(&mut app, "u");
         assert!(!app.source_mode);
     }
+
+    /// F2で切り替えたとき、カーソルの対応する位置に
+    /// 着地する（毎回先頭に戻らない）。
+    #[test]
+    fn f2_preserves_cursor_position() {
+        let mut app = insert(
+            "define\n\tf\nx\n\x08define\n\tg\ny",
+        );
+        press(&mut app, "\x1b");
+        assert_eq!(
+            app.to_scheme(),
+            "(define f\n  x)\n\n(define g\n  y)"
+        );
+
+        // 2つ目のdefineの見出し（g）にカーソルを置く。
+        let g = app
+            .nodes
+            .iter()
+            .position(|n| n.text == "g")
+            .unwrap();
+        app.cursor = g;
+
+        app.toggle_source_view();
+        assert!(app.source_mode);
+        // gの行に着地する。fの行には戻らない。
+        assert_eq!(app.nodes[app.cursor].text, "(define g");
+
+        // 木に戻すと、同じ行にある g のノードに戻る。
+        app.toggle_source_view();
+        assert!(!app.source_mode);
+        assert_eq!(app.nodes[app.cursor].text, "g");
+    }
+
+    /// 1行に収まる子ノードにカーソルがあっても、
+    /// 畳んだ親の位置に着地する。
+    #[test]
+    fn f2_falls_back_to_enclosing_node() {
+        let mut app = insert("+\n\t1\n2");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(+ 1 2)");
+
+        // "2" は "+" と同じ1行に畳まれているので、
+        // 個別の記録を持たない。
+        press(&mut app, "j");
+        assert_eq!(app.text(), "2");
+
+        app.toggle_source_view();
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.nodes[0].text, "(+ 1 2)");
+    }
+
+
+    /// 列も、対応するノードのテキストが始まる
+    /// 位置に合わせる。
+    #[test]
+    fn f2_preserves_cursor_column() {
+        let mut app = insert("abcdef");
+        press(&mut app, "\x1b0lll"); // 列3(d)へ。
+        assert_eq!(app.cursor_col, 3);
+
+        app.toggle_source_view();
+        assert_eq!(app.cursor_col, 3);
+        assert_eq!(app.nodes[0].text, "abcdef");
+    }
+
+    /// 子を持つノード自身にカーソルがあるときも、
+    /// 開き括弧の分ずれずに列が合う。
+    #[test]
+    fn f2_preserves_cursor_column_with_children() {
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1bgg0"); // fノード、列0。
+        assert_eq!(app.to_scheme(), "(f a)");
+        app.toggle_source_view();
+        // "(f a)" の f は列1（開き括弧の次）。
+        assert_eq!(app.nodes[0].text, "(f a)");
+        assert_eq!(app.cursor_col, 1);
+    }
+
+
 }
