@@ -9,5 +9,5 @@ name = "sedit"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["bracketed-paste"] }
 ratatui = "0.30"

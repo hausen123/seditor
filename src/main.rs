@@ -11,6 +11,8 @@ use std::time::Duration;
 use crossterm::{
     event::{
         self,
+        DisableBracketedPaste,
+        EnableBracketedPaste,
         Event,
         KeyCode,
         KeyEvent,
@@ -963,6 +965,51 @@ impl App {
         node.text.insert(self.cursor_col, c);
         self.cursor_col += c.len_utf8();
         self.record();
+    }
+
+    /// 貼り付けたテキストをカーソル位置に反映する。
+    /// 改行のたびにEnterと同じくノードを分ける。
+    fn paste_text(&mut self, text: &str) {
+        // \r\n の \r は無視する。
+        let text = text.replace('\r', "");
+        let mut lines = text.split('\n');
+
+        if let Some(first) = lines.next() {
+            for c in first.chars() {
+                self.insert_char(c);
+            }
+        }
+
+        for line in lines {
+            self.enter();
+            for c in line.chars() {
+                self.insert_char(c);
+            }
+        }
+    }
+
+    /// bracketed pasteで届いたテキストを反映する。
+    ///
+    /// コマンド行は1行しか持てないので最初の行だけ。
+    /// Normalモードでの貼り付けは、そのままだと
+    /// 文字列がキー入力として解釈されコマンド列に
+    /// なってしまう危険があるため、1つの編集として
+    /// 直接テキストを挿入する（vimと同じ扱い）。
+    fn handle_paste(&mut self, text: &str) {
+        match self.mode {
+            Mode::Command => {
+                if let Some(first) = text.lines().next() {
+                    self.command.push_str(first);
+                }
+            }
+            Mode::Insert => {
+                self.paste_text(text);
+            }
+            Mode::Normal => {
+                self.begin_edit();
+                self.paste_text(text);
+            }
+        }
     }
 
     /// カーソルの手前の1文字を消す。
@@ -2362,7 +2409,8 @@ fn main() -> io::Result<()> {
 
     execute!(
         stdout,
-        EnterAlternateScreen
+        EnterAlternateScreen,
+        EnableBracketedPaste
     )?;
 
     let backend =
@@ -2382,6 +2430,7 @@ fn main() -> io::Result<()> {
 
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen
     )?;
 
@@ -2413,15 +2462,21 @@ fn run(
         if event::poll(
             Duration::from_millis(50)
         )? {
-            if let Event::Key(key) = event::read()? {
-                // 離したときのイベントを送る端末が
-                // あるので、押した分だけ処理する。
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            match event::read()? {
+                Event::Key(key) => {
+                    // 離したときのイベントを送る端末が
+                    // あるので、押した分だけ処理する。
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if !app.handle_key(key) {
+                        break;
+                    }
                 }
-                if !app.handle_key(key) {
-                    break;
+                Event::Paste(text) => {
+                    app.handle_paste(&text);
                 }
+                _ => {}
             }
         }
     }
@@ -4186,4 +4241,58 @@ mod tests {
             "(f a)\n\nnew\n\nline"
         );
     }
+
+    /// bracketed pasteは、中身がキー入力として
+    /// 再解釈されず、テキストとしてそのまま入る。
+    #[test]
+    fn bracketed_paste_in_insert_mode() {
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a)");
+
+        // 貼り付けの中身にTabが混じっていても、
+        // ノードのテキストにそのまま入る（キー入力の
+        // Tabのように空白2つへ変換されたりしない）。
+        // ソース表示のまま確認する。木に戻すと
+        // Schemeのリーダーがタブを区切りとして読み、
+        // 別トークンに分かれてしまうため。
+        app.toggle_source_view();
+        press(&mut app, "A");
+        app.handle_paste("new\tline\nsecond");
+
+        assert_eq!(app.nodes[0].text, "(f a)new\tline");
+        assert_eq!(app.nodes[1].text, "second");
+    }
+
+    /// Normalモードでの貼り付けは、内容がコマンド列
+    /// として実行されず、1回の編集としてテキストが
+    /// 挿入される。
+    #[test]
+    fn bracketed_paste_in_normal_mode() {
+        let mut app = insert("f\n\ta\nb");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a b)");
+
+        // ddを含む文字列を貼り付けても、ノードを
+        // 消したりしない。
+        press(&mut app, "gg0");
+        app.handle_paste("ddyyx");
+        assert_eq!(app.nodes[0].text, "ddyyxf");
+        assert_eq!(app.to_scheme(), "(ddyyxf a b)");
+
+        // 1回のundoで全部戻る。
+        press(&mut app, "u");
+        assert_eq!(app.to_scheme(), "(f a b)");
+    }
+
+    /// コマンド行への貼り付けは最初の行だけ入る。
+    #[test]
+    fn bracketed_paste_in_command_mode() {
+        let mut app = insert("f");
+        press(&mut app, "\x1b:");
+        app.handle_paste("w foo.scm\nrm -rf /");
+        assert_eq!(app.command, "w foo.scm");
+    }
+
+
 }
