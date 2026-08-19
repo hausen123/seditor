@@ -1933,6 +1933,21 @@ impl App {
             ));
         }
 
+        // crosstermは生モードで \n (0x0A) を素の
+        // KeyCode::Enterではなく Ctrl+j として届ける
+        // （\rだけが無条件でEnterになる）。手で
+        // Ctrl+jを押したときと同じ意味だが、貼り付けた
+        // 複数行のテキストが1文字ずつ届くときは改行の
+        // たびにこれが起きるので、Enterとして扱う。
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('j')
+        {
+            return self.handle_key(KeyEvent::new(
+                KeyCode::Enter,
+                key.modifiers & !KeyModifiers::CONTROL,
+            ));
+        }
+
         // コマンド入力中は矢印もF2も横取りしない。
         if self.mode == Mode::Command {
             self.handle_command(key.code);
@@ -4108,4 +4123,67 @@ mod tests {
 
 
 
+
+    /// crosstermは生モードで \n を素のEnterではなく
+    /// Ctrl+jとして届ける。貼り付けた複数行のテキストが
+    /// 1文字ずつ届くとき、改行のたびにこれが起きる。
+    #[test]
+    fn ctrl_j_is_enter() {
+        // 貼り付けを模して、Ctrl+j混じりで1文字ずつ流す。
+        let mut app = insert("ab");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        ));
+        press(&mut app, "cd");
+        assert_eq!(app.to_scheme(), "ab\n\ncd");
+        // jという文字が紛れ込んでいないこと。
+        assert_eq!(app.nodes[0].text, "ab");
+        assert_eq!(app.nodes[1].text, "cd");
+
+        // Normalモードでも同じキーとして届く。
+        let mut app = insert("x");
+        press(&mut app, "\x1b");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        ));
+        // NormalモードのEnterは何もしない
+        // （挿入モードのように行を分けたりしない）。
+        assert_eq!(app.to_scheme(), "x");
+    }
+
+    /// 複数行の貼り付けを1文字ずつ模して、実際の
+    /// 報告に近い状況（ソース表示での貼り付け）を
+    /// 確かめる。改行のたびにCtrl+jを挟む。
+    #[test]
+    fn paste_multiline_into_source_view() {
+        let mut app = insert("f\n\ta");
+        press(&mut app, "\x1b");
+        assert_eq!(app.to_scheme(), "(f a)");
+
+        app.toggle_source_view();
+        press(&mut app, "A");
+
+        let words = ["new", "line"];
+        for (i, word) in words.iter().enumerate() {
+            if i > 0 {
+                app.handle_key(KeyEvent::new(
+                    KeyCode::Char('j'),
+                    KeyModifiers::CONTROL,
+                ));
+            }
+            press(&mut app, word);
+        }
+
+        press(&mut app, "\x1b");
+        app.toggle_source_view();
+        // "(f a)" の直後に "new" と "line" が独立した
+        // 式として増える。jという文字が紛れ込んでいない
+        // こと。
+        assert_eq!(
+            app.to_scheme(),
+            "(f a)\n\nnew\n\nline"
+        );
+    }
 }
