@@ -342,6 +342,20 @@ struct App {
     /// 木の表示でガターを除いた横の文字数。
     /// 描画時に入る。
     width: usize,
+    /// 各ノードが画面上で何行目から始まるか。
+    ///
+    /// scroll/height/カーソル追従は、ノード番号では
+    /// なくこの「画面行」を基準にする。木の表示は
+    /// 折り返さないので常に [0,1,2,...]（1ノード=1行）
+    /// になる。ソース表示は折り返すので、ratatuiが
+    /// 実際に使うのと同じアルゴリズムで1ノードが
+    /// 何行になるか数える必要がある。そうしないと
+    /// scrollの単位（画面行）とノード番号がずれ、
+    /// カーソルが画面外に描画されることがある。
+    /// 描画時に入る。
+    row_offsets: Vec<usize>,
+    /// 折り返した後の全体行数。描画時に入る。
+    total_rows: usize,
     /// 編集の区切りで取った控え。
     ///
     /// 実際に変更が起きるまでundoには積まない。
@@ -378,6 +392,8 @@ impl App {
             h_scroll: 0,
             height: 0,
             width: 0,
+            row_offsets: Vec::new(),
+            total_rows: 0,
             held: None,
         }
     }
@@ -386,20 +402,126 @@ impl App {
     // スクロール
     // ------------------------------------------------------------
 
+    /// row_offsets/total_rowsを最新にする。
+    ///
+    /// widthは実際にParagraphへ渡る幅（枠を除いた分）と
+    /// 一致させること。ずれるとratatuiの折り返し計算と
+    /// 食い違い、この仕組み自体が無意味になる。
+    fn refresh_row_offsets(&mut self, width: u16) {
+        let mut offsets =
+            Vec::with_capacity(self.nodes.len());
+        let mut total = 0;
+
+        if self.source_mode && width > 0 {
+            for line in self.tree_display() {
+                offsets.push(total);
+                // Paragraph::line_countは、実際の描画と
+                // 同じWordWrapperで折り返し後の行数を
+                // 数える公開APIなので、これを使えば
+                // ratatuiの折り返しと必ず一致する。
+                let height = Paragraph::new(Text::from(
+                    vec![line],
+                ))
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .max(1);
+
+                total += height;
+            }
+        } else {
+            // 木の表示は折り返さないので、常に
+            // 1ノード=1行。
+            for _ in 0..self.nodes.len() {
+                offsets.push(total);
+                total += 1;
+            }
+        }
+
+        self.row_offsets = offsets;
+        self.total_rows = total;
+    }
+
+    /// カーソルの画面上の行。row_offsetsが古い
+    /// （draw()をまだ通していない）場合はcursorを
+    /// そのまま使う。
+    fn cursor_row(&self) -> usize {
+        self.row_offsets
+            .get(self.cursor)
+            .copied()
+            .unwrap_or(self.cursor)
+    }
+
+    /// row_offsetsが有効なときのノード数ぶんの
+    /// 画面行数。無効なときはノード数をそのまま使う
+    /// （height==0のときのfollow_cursor()と同じ
+    /// 考え方）。
+    fn total_rows(&self) -> usize {
+        if self.row_offsets.len() == self.nodes.len() {
+            self.total_rows
+        } else {
+            self.nodes.len()
+        }
+    }
+
+    /// 画面行からノード番号を逆引きする。対象行以下で
+    /// 一番近いノードを返す。
+    ///
+    /// row_offsetsがまだ描画を経ておらずnodesと数が
+    /// 合わないときは、cursor_row()/total_rows()と
+    /// 同じく「1ノード=1行」とみなして素通しする。
+    fn node_at_row(&self, target: usize) -> usize {
+        if self.row_offsets.len() != self.nodes.len() {
+            return target;
+        }
+
+        let mut best = 0;
+        let mut best_row = 0;
+
+        for (index, &row) in
+            self.row_offsets.iter().enumerate()
+        {
+            if row <= target && row >= best_row {
+                best_row = row;
+                best = index;
+            }
+        }
+
+        best
+    }
+
     /// カーソルが画面に入るよう最小限だけ動かす。
     ///
-    /// 見えている間は動かさない。
+    /// 見えている間は動かさない。ノード番号ではなく
+    /// 画面行（row_offsets）を基準にする。ソース表示は
+    /// 折り返すので、1ノードが複数行になることがあり、
+    /// ノード番号をそのままscrollに使うとずれる。
     fn follow_cursor(&mut self) {
         if self.height == 0 {
             return;
         }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + self.height
-        {
-            self.scroll =
-                self.cursor - self.height + 1;
+        let row = self.cursor_row();
+        if row < self.scroll {
+            self.scroll = row;
+        } else if row >= self.scroll + self.height {
+            self.scroll = row - self.height + 1;
         }
+    }
+
+    /// カーソルが画面の中央に来るようscrollを合わせる。
+    /// Mの逆（Mはカーソルをscrollに合わせて動かす）。
+    ///
+    /// 端では収まる範囲に収めるので、厳密に中央には
+    /// ならないことがある（vimのzzと同じ）。
+    fn center_on_cursor(&mut self) {
+        if self.height == 0 {
+            return;
+        }
+        let half = self.height / 2;
+        let row = self.cursor_row();
+        let target = row.saturating_sub(half);
+        let last_scroll =
+            self.total_rows().saturating_sub(self.height);
+        self.scroll = target.min(last_scroll);
     }
 
     /// カーソルの画面上の桁を数える。
@@ -452,8 +574,7 @@ impl App {
     /// 両方を同じだけ動かすと画面上の行が変わらない。
     fn scroll_page(&mut self, lines: isize) {
         let last_scroll = self
-            .nodes
-            .len()
+            .total_rows()
             .saturating_sub(self.height);
 
         self.scroll = self
@@ -463,18 +584,25 @@ impl App {
 
         let last = self.nodes.len() - 1;
 
-        self.cursor = self
-            .cursor
-            .saturating_add_signed(lines)
-            .min(last);
-
-        // scrollが端で止まったときは画面内に戻す。
-        let bottom = (self.scroll + self.height)
-            .saturating_sub(1)
-            .min(last);
+        let target_row = self
+            .cursor_row()
+            .saturating_add_signed(lines);
 
         self.cursor =
-            self.cursor.clamp(self.scroll, bottom);
+            self.node_at_row(target_row).min(last);
+
+        // scrollが端で止まったときは画面内に戻す。
+        // 行（row_offsets）で範囲を決め、ノードに
+        // 逆引きしてからクランプする。
+        let bottom_row = (self.scroll + self.height)
+            .saturating_sub(1);
+
+        let min_node = self.node_at_row(self.scroll);
+        let max_node =
+            self.node_at_row(bottom_row).min(last);
+
+        self.cursor =
+            self.cursor.clamp(min_node, max_node);
 
         self.cursor_col =
             self.cursor_col.min(self.text().len());
@@ -738,6 +866,7 @@ impl App {
             .unwrap_or(text.len());
 
         self.source_mode = true;
+        self.center_on_cursor();
     }
 
     /// ソース表示の各行を連結し、読み直して木に戻す。
@@ -775,6 +904,7 @@ impl App {
         self.cursor = Self::node_at_line(&positions, line);
         self.cursor_col = 0;
         self.source_mode = false;
+        self.center_on_cursor();
     }
 
     /// ファイルを読む。読めたらtrueを返す。
@@ -2334,6 +2464,13 @@ fn draw(
     app.width = (areas[0].width as usize)
         .saturating_sub(2)
         .saturating_sub(gutter);
+
+    // scroll/カーソル追従の単位（画面行）を最新にする。
+    // ソース表示は折り返すので、1ノードが複数行になる
+    // ことがある。
+    app.refresh_row_offsets(
+        areas[0].width.saturating_sub(2),
+    );
 
     // ソース表示も木と同じ App::nodes/cursor を使う
     // （F2でdepth:0の行に変換してある）ので、
@@ -4295,4 +4432,73 @@ mod tests {
     }
 
 
+
+    /// F2で切り替えるとカーソルが画面の中央に来る
+    /// よう自動でスクロールする。
+    #[test]
+    fn f2_centers_cursor() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..30 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1b");
+        // 高さ7の画面。20番目のノードへ移動してからF2。
+        screen(&mut terminal, &mut app);
+        press(&mut app, ":20\n");
+        app.toggle_source_view();
+        // scroll + height/2 が着地したノード番号に近い
+        // （画面の中央付近に来る）。
+        assert_eq!(app.scroll + app.height / 2, app.cursor);
+
+        // 木に戻すときも同様。
+        app.toggle_source_view();
+        assert_eq!(app.scroll + app.height / 2, app.cursor);
+    }
+
+    /// 折り返しのある長い行を含む木の末尾でF2を押しても
+    /// カーソルが画面外に消えない。
+    ///
+    /// ratatuiのParagraph::scroll()は折り返し有効時、
+    /// yをノード番号ではなく折り返し後の画面行として
+    /// 解釈する。scroll/height/カーソル追従の単位を
+    /// row_offsets（画面行）にそろえていないと、
+    /// この境界でカーソルがどの行にも描画されなくなる。
+    #[test]
+    fn f2_at_bottom_keeps_cursor_visible() {
+        let text = std::fs::read_to_string(
+            "test/test.scm",
+        )
+        .unwrap();
+        let reading = reader::read(&text).unwrap();
+        let mut app = App::new();
+        app.nodes = nodes_from(&reading.data);
+        app.cursor = app.nodes.len() - 1;
+
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(40, 20),
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .unwrap();
+        app.toggle_source_view();
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let visible = buffer.content.iter().any(|cell| {
+            cell.modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        });
+        assert!(
+            visible,
+            "カーソルのセルが画面のどこにも見つかりません"
+        );
+    }
 }
