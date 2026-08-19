@@ -90,6 +90,23 @@ fn nodes_from(data: &[Datum]) -> Vec<Node> {
     nodes
 }
 
+/// マーカーの連なりがアトム1つに行き着くなら、
+/// 印の文字を連結したテキストを返す。
+///
+/// '`x のように印が複数重なっていても、最終的に
+/// アトムなら1ノードに畳めるため。リストや
+/// コメントに行き着く場合はNone。
+fn atom_chain(datum: &Datum) -> Option<String> {
+    match datum {
+        Datum::Atom(text) => Some(text.clone()),
+        Datum::Marker(mark, child) => {
+            atom_chain(child)
+                .map(|rest| format!("{}{}", mark, rest))
+        }
+        _ => None,
+    }
+}
+
 fn emit(
     datum: &Datum,
     depth: usize,
@@ -103,11 +120,7 @@ fn emit(
             })
         }
         Datum::Marker(mark, child) => {
-            nodes.push(Node {
-                text: mark.clone(),
-                depth,
-            });
-            emit(child, depth + 1, nodes);
+            emit_marker(mark, child, depth, nodes);
         }
         Datum::List(items) => {
             // 先頭がアトムなら見出しに置く。
@@ -141,6 +154,82 @@ fn emit(
             };
             for item in rest {
                 emit(item, depth + 1, nodes);
+            }
+        }
+    }
+}
+
+/// マーカーを書き出す。emit()とemit_quoted()の
+/// どちらから呼ばれても同じ規則になる。
+///
+/// アトムに行き着くなら1ノードに畳む。リストなら、
+/// 空リストだけ例外的に◦を挟み、それ以外は◦を
+/// 挟まずマーカー自身が要素を直接子に持つ（クォートの
+/// 中は呼び出しではなくただのデータの並びなので、
+/// 先頭を見出しにする理由が無い）。マーカーが
+/// 続く場合はそのまま連結する。
+fn emit_marker(
+    mark: &str,
+    child: &Datum,
+    depth: usize,
+    nodes: &mut Vec<Node>,
+) {
+    if let Some(rest) = atom_chain(child) {
+        nodes.push(Node {
+            text: format!("{}{}", mark, rest),
+            depth,
+        });
+        return;
+    }
+
+    nodes.push(Node {
+        text: mark.to_string(),
+        depth,
+    });
+
+    match child {
+        Datum::List(items) if items.is_empty() => {
+            // '() だけ例外的に◦を挟む。
+            nodes.push(Node {
+                text: String::new(),
+                depth: depth + 1,
+            });
+        }
+        Datum::List(items) => {
+            for item in items {
+                emit_quoted(item, depth + 1, nodes);
+            }
+        }
+        _ => emit(child, depth + 1, nodes),
+    }
+}
+
+/// クォートの中を書き出す。emit()と違い、リストは
+/// 先頭がアトムでも見出しにせず、常に◦にする
+/// （マーカーの付いていない入れ子のリストには
+/// attach先が無いため）。
+fn emit_quoted(
+    datum: &Datum,
+    depth: usize,
+    nodes: &mut Vec<Node>,
+) {
+    match datum {
+        Datum::Atom(text) | Datum::Comment(text) => {
+            nodes.push(Node {
+                text: text.clone(),
+                depth,
+            })
+        }
+        Datum::Marker(mark, child) => {
+            emit_marker(mark, child, depth, nodes);
+        }
+        Datum::List(items) => {
+            nodes.push(Node {
+                text: String::new(),
+                depth,
+            });
+            for item in items {
+                emit_quoted(item, depth + 1, nodes);
             }
         }
     }
@@ -1601,15 +1690,14 @@ impl App {
         result
     }
 
-    /// '(a b) の ' のように、子1つの前に付いて
-    /// 括弧を足さないノードかどうか。
+    /// '(a b) の ' のように、要素を括弧無しで直接
+    /// 子に持てる印かどうか。
     ///
-    /// #t や #\a のように子を持たないものは
-    /// この判定を通らずアトムとして扱われる。
+    /// テキストが印の記号と完全一致するときだけ。
+    /// '`x`（連なりがアトムに畳まれた形）のように
+    /// 記号の後に文字が続くものは、この判定を通らず
+    /// ただのアトムとして扱われる。#t や #\a も同様。
     fn is_marker(&self, index: usize) -> bool {
-        if self.children(index).len() != 1 {
-            return false;
-        }
         let text = self.nodes[index].text.trim();
         matches!(
             text,
@@ -1626,11 +1714,29 @@ impl App {
         let text = self.nodes[index].text.trim();
         let children = self.children(index);
         if self.is_marker(index) {
-            return format!(
-                "{}{}",
-                text,
-                self.flat(children[0])
-            );
+            // 子が別の印か◦なら、そのまま連結する
+            // （クォートの中の入れ子の引用や、
+            // '() の◦のように、その1個がマーカーの
+            // 中身そのものを表す場合）。
+            if children.len() == 1
+                && (self.is_marker(children[0])
+                    || self.nodes[children[0]]
+                        .text
+                        .trim()
+                        .is_empty())
+            {
+                return format!(
+                    "{}{}",
+                    text,
+                    self.flat(children[0])
+                );
+            }
+            // それ以外は◦を挟まず、要素を直接並べる。
+            let parts: Vec<String> = children
+                .iter()
+                .map(|&child| self.flat(child))
+                .collect();
+            return format!("{}({})", text, parts.join(" "));
         }
         if !text.is_empty() && children.is_empty() {
             return text.to_string();
@@ -1691,12 +1797,44 @@ impl App {
         let text = self.nodes[index].text.trim();
         let children = self.children(index);
         if self.is_marker(index) {
+            // 子が別の印か◦なら、そのまま連結する。
+            if children.len() == 1
+                && (self.is_marker(children[0])
+                    || self.nodes[children[0]]
+                        .text
+                        .trim()
+                        .is_empty())
+            {
+                output.push_str(text);
+                self.write_pretty(
+                    children[0],
+                    output,
+                    positions,
+                );
+                return;
+            }
+            // それ以外は◦を挟まず、要素を直接並べる。
+            // 幅に収まらなければ第1要素の桁に揃える。
+            let flat = self.flat(index);
+            if children.is_empty()
+                || indent + flat.chars().count() <= WIDTH
+            {
+                output.push_str(&flat);
+                return;
+            }
             output.push_str(text);
+            output.push('(');
+            let column = current_column(output);
             self.write_pretty(
-                children[0],
+                children[0], output, positions,
+            );
+            self.write_children(
+                &children[1..],
+                column,
                 output,
                 positions,
             );
+            output.push(')');
             return;
         }
         let flat = self.flat(index);
@@ -2357,20 +2495,29 @@ mod tests {
         ]);
     }
 
-    /// 印ノード。子1つの前に付き、括弧を足さない。
+    /// 印ノード。要素は◦を挟まず直接子に持つ。
     #[test]
     fn markers() {
         check(&[
-            ("'\n\ta\n\tb", "'(a b)"),
-            ("`\n\ta\n\t,b", "`(a ,b)"),
-            (",@\n\ta\n\tb", ",@(a b)"),
-            ("#\n\t1\n\t2", "#(1 2)"),
-            ("#u8\n\t1\n\t2", "#u8(1 2)"),
-            ("#;\n\ta\n\tb", "#;(a b)"),
-            ("#0=\n\ta\n\tb", "#0=(a b)"),
-            // 入れ子の擬似引用
-            ("`\n\ta\n\t`\n\tb\n\t,c", "`(a `(b ,c))"),
-            // 引用付きシンボルはただのテキスト
+            ("'\n\ta\nb", "'(a b)"),
+            ("`\n\ta\n,b", "`(a ,b)"),
+            (",@\n\ta\nb", ",@(a b)"),
+            ("#\n\t1\n2", "#(1 2)"),
+            ("#u8\n\t1\n2", "#u8(1 2)"),
+            ("#;\n\ta\nb", "#;(a b)"),
+            ("#0=\n\ta\nb", "#0=(a b)"),
+            // 3個以上も同様。
+            ("'\n\t1\n2\n3", "'(1 2 3)"),
+            // 要素1個はマーカーが直接持つ。
+            ("'\n\tx", "'(x)"),
+            // 空リストは◦を挟む例外。
+            ("'\n\t", "'()"),
+            // 入れ子の擬似引用。
+            (
+                "`\n\ta\n`\n\tb\n,c",
+                "`(a `(b ,c))",
+            ),
+            // 引用付きシンボルはただのテキスト。
             ("\n\t'a\nb", "('a b)"),
         ]);
     }
@@ -2458,12 +2605,17 @@ mod tests {
         ]);
     }
 
-    /// 印ノードの子が1つでない場合は普通のリストとして出す。
+    /// 編集で作れる縮退した形でも、印字は落ちずに
+    /// それなりの結果を返す。
     #[test]
-    fn marker_wrong_arity() {
+    fn marker_degenerate_shapes() {
         check(&[
-            ("'\n\ta\nb", "(' a b)"),
-            ("'", "'"),
+            // 子を1つも作らずに終わった印。
+            ("'", "'()"),
+            // 子が1個で、それ自体が子を持つ複合式
+            // （'a に子bを付けた場合）。1要素のリストの
+            // 中身がさらにリストである、という意味になる。
+            ("'\n\ta\n\tb", "'((a b))"),
         ]);
     }
 
@@ -2687,7 +2839,13 @@ mod tests {
             "(f)",
             "(a . b)",
             "(f a . rest)",
+            "'x",
+            "'`x",
+            "'()",
+            "'(x)",
             "'(a b)",
+            "'(1 2 3)",
+            "'(a (b c) d)",
             "`(a ,b)",
             ",@(a b)",
             "#(1 2)",
@@ -3946,6 +4104,8 @@ mod tests {
         assert_eq!(app.nodes[0].text, "(f a)");
         assert_eq!(app.cursor_col, 1);
     }
+
+
 
 
 }
