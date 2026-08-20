@@ -283,6 +283,72 @@ fn number_span(
     )
 }
 
+/// 検索パターンを、vimの既定（magicモード）の感覚に
+/// 合わせてRustのregex構文へ書き換える。
+///
+/// vimの既定では `? + ( ) { } |` はエスケープなしだと
+/// リテラルで、`\?` `\+` `\(` `\)` `\{` `\}` `\|` と
+/// 書いたときだけ特殊な意味になる。Rustのregexはその
+/// 逆（エスケープなしで特殊、エスケープするとリテラル）
+/// なので、この7文字だけ意味を反転させる。
+///
+/// `\=` は`\?`のvimでの別表記なので同じ意味に変換する。
+/// `\a`はvimでは英字1文字を表すが、Rustの`\a`はベル文字
+/// (0x07)という別物になってしまうので、同じ意味のPOSIX
+/// クラス`[[:alpha:]]`に展開する。
+///
+/// それ以外の文字（`.` `*` `^` `$` `[` `]` や `\d` の
+/// ようなエスケープ列）はvimとRustで扱いが同じなので
+/// そのまま通す。
+fn translate_vim_pattern(pattern: &str) -> String {
+    const SWAP: [char; 7] =
+        ['?', '+', '(', ')', '{', '}', '|'];
+
+    let mut output = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                // \? \+ \( \) \{ \} \| はvimでは特殊。
+                // バックスラッシュを外し、Rustの
+                // メタ文字として機能させる。
+                Some(next) if SWAP.contains(&next) => {
+                    output.push(next);
+                }
+                // \= は\?と同じ（0か1回）のvimの別表記。
+                Some('=') => output.push('?'),
+                // \a はvimでは英字1文字。Rustには
+                // 対応する短縮記法が無く、素通しすると
+                // ベル文字(0x07)という別物になって
+                // しまうので、同じ意味のPOSIXクラスに
+                // 展開する。
+                Some('a') => {
+                    output.push_str("[[:alpha:]]")
+                }
+                // それ以外の \X はvimとRustで意味が
+                // 変わらないのでそのまま通す
+                // （\. \d \\ \/ など）。
+                Some(next) => {
+                    output.push('\\');
+                    output.push(next);
+                }
+                None => output.push('\\'),
+            }
+        } else if SWAP.contains(&c) {
+            // エスケープの無い ? + ( ) { } | はvimでは
+            // リテラル。Rustでリテラルにするには
+            // エスケープが要る。
+            output.push('\\');
+            output.push(c);
+        } else {
+            output.push(c);
+        }
+    }
+
+    output
+}
+
 /// 巻き戻すために丸ごと控えておく状態。
 #[derive(Clone)]
 struct Snapshot {
@@ -300,6 +366,7 @@ enum Mode {
     Normal,
     Insert,
     Command,
+    Search,
 }
 
 struct App {
@@ -312,6 +379,13 @@ struct App {
     pending: Option<char>,
     /// :の入力中の文字列。:は含まない。
     command: String,
+    /// / や ? の入力中の文字列。記号自体は含まない。
+    search: String,
+    /// 入力中・直前の検索が前方（/）か後方（?）か。
+    search_forward: bool,
+    /// n・N で繰り返すための直前の検索。
+    /// パターンと方向（trueなら前方）を持つ。
+    last_search: Option<(String, bool)>,
     path: Option<PathBuf>,
     modified: bool,
     /// 画面下に出す一言。
@@ -378,6 +452,9 @@ impl App {
             mode: Mode::Normal,
             pending: None,
             command: String::new(),
+            search: String::new(),
+            search_forward: true,
+            last_search: None,
             path: None,
             modified: false,
             message: String::new(),
@@ -1032,6 +1109,145 @@ impl App {
             self.cursor_col.min(self.text().len());
     }
 
+    // ------------------------------------------------------------
+    // 検索
+    // ------------------------------------------------------------
+
+    /// / や ? の入力を確定したときに呼ぶ。
+    ///
+    /// 空文字なら直前のパターンを使う（vimの`//`と同じ）。
+    /// 見つかったパターンは n・N のために覚えておく。
+    fn search_and_move(
+        &mut self,
+        pattern: &str,
+        forward: bool,
+    ) {
+        let pattern = if pattern.is_empty() {
+            match &self.last_search {
+                Some((last, _)) => last.clone(),
+                None => {
+                    self.message =
+                        "検索パターンがありません"
+                            .to_string();
+                    return;
+                }
+            }
+        } else {
+            translate_vim_pattern(pattern)
+        };
+
+        self.last_search =
+            Some((pattern.clone(), forward));
+        self.perform_search(&pattern, forward);
+    }
+
+    /// n・N で直前のパターンを繰り返す。
+    ///
+    /// same_directionがfalseなら逆方向。繰り返すたびに
+    /// 基準の方向が変わらないよう、last_searchはここでは
+    /// 更新しない。
+    fn repeat_search(&mut self, same_direction: bool) {
+        let Some((pattern, forward)) =
+            self.last_search.clone()
+        else {
+            self.message =
+                "検索パターンがありません".to_string();
+            return;
+        };
+
+        let direction = if same_direction {
+            forward
+        } else {
+            !forward
+        };
+
+        self.perform_search(&pattern, direction);
+    }
+
+    /// * と # 。カーソルのノードのテキストをそのまま
+    /// （正規表現として特別扱いせず）パターンにする。
+    fn search_word(&mut self, forward: bool) {
+        let text = self.text().to_string();
+
+        if text.is_empty() {
+            self.message =
+                "空のノードは検索できません".to_string();
+            return;
+        }
+
+        let pattern = regex::escape(&text);
+        self.last_search =
+            Some((pattern.clone(), forward));
+        self.perform_search(&pattern, forward);
+    }
+
+    /// 実際にパターンをコンパイルしてカーソルを動かす。
+    ///
+    /// 大文字を含まないパターンは大文字小文字を無視する
+    /// （smartcase）。末尾/先頭まで探して見つからなければ
+    /// 逆側から折り返す（wrapscan）。
+    fn perform_search(
+        &mut self,
+        pattern: &str,
+        forward: bool,
+    ) {
+        let ignore_case =
+            !pattern.chars().any(|c| c.is_uppercase());
+
+        let regex = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()
+        {
+            Ok(regex) => regex,
+            Err(error) => {
+                self.message = format!(
+                    "検索パターンが不正です: {}",
+                    error
+                );
+                return;
+            }
+        };
+
+        let len = self.nodes.len();
+        let start = self.cursor;
+
+        let found = (1..=len).map(|offset| {
+            if forward {
+                (start + offset) % len
+            } else {
+                (start + len - offset) % len
+            }
+        }).find(|&index| {
+            regex.is_match(&self.nodes[index].text)
+        });
+
+        let Some(index) = found else {
+            self.message = format!(
+                "パターンが見つかりません: {}",
+                pattern
+            );
+            return;
+        };
+
+        let wrapped = if forward {
+            index < start
+        } else {
+            index > start
+        };
+
+        self.move_to(index);
+
+        self.message = if wrapped && forward {
+            "検索は末尾から先頭へ折り返しました"
+                .to_string()
+        } else if wrapped {
+            "検索は先頭から末尾へ折り返しました"
+                .to_string()
+        } else {
+            String::new()
+        };
+    }
+
     /// カーソルの1つ上に同じ深さの空ノードを作る。
     fn open_above(&mut self) {
         let depth = self.nodes[self.cursor].depth;
@@ -1130,6 +1346,11 @@ impl App {
             Mode::Command => {
                 if let Some(first) = text.lines().next() {
                     self.command.push_str(first);
+                }
+            }
+            Mode::Search => {
+                if let Some(first) = text.lines().next() {
+                    self.search.push_str(first);
                 }
             }
             Mode::Insert => {
@@ -2131,6 +2352,12 @@ impl App {
             return !self.quit;
         }
 
+        // 検索パターンの入力中も同様。
+        if self.mode == Mode::Search {
+            self.handle_search(key.code);
+            return !self.quit;
+        }
+
         if self.handle_common(key.code) {
             return true;
         }
@@ -2141,6 +2368,7 @@ impl App {
                 self.handle_insert(key.code)
             }
             Mode::Command => {}
+            Mode::Search => {}
         }
 
         !self.quit
@@ -2165,6 +2393,32 @@ impl App {
                 }
             }
             KeyCode::Char(c) => self.command.push(c),
+            _ => {}
+        }
+    }
+
+    fn handle_search(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.search.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let pattern =
+                    std::mem::take(&mut self.search);
+                self.mode = Mode::Normal;
+                self.search_and_move(
+                    &pattern,
+                    self.search_forward,
+                );
+            }
+            KeyCode::Backspace => {
+                // 空の状態で消すと抜ける。
+                if self.search.pop().is_none() {
+                    self.mode = Mode::Normal;
+                }
+            }
+            KeyCode::Char(c) => self.search.push(c),
             _ => {}
         }
     }
@@ -2408,6 +2662,25 @@ impl App {
                 self.message.clear();
                 self.mode = Mode::Command;
             }
+            '/' => {
+                self.search.clear();
+                self.message.clear();
+                self.search_forward = true;
+                self.mode = Mode::Search;
+            }
+            '?' => {
+                self.search.clear();
+                self.message.clear();
+                self.search_forward = false;
+                self.mode = Mode::Search;
+            }
+            // 直前の検索を同じ方向・逆方向に繰り返す。
+            'n' => self.repeat_search(true),
+            'N' => self.repeat_search(false),
+            // カーソルのノードのテキストをそのまま
+            // パターンにして前方・後方検索する。
+            '*' => self.search_word(true),
+            '#' => self.search_word(false),
             _ => {}
         }
     }
@@ -2505,6 +2778,10 @@ fn draw(
 
     let status = if app.mode == Mode::Command {
         format!(":{}", app.command)
+    } else if app.mode == Mode::Search {
+        let prefix =
+            if app.search_forward { '/' } else { '?' };
+        format!("{}{}", prefix, app.search)
     } else {
         app.message.clone()
     };
@@ -2530,6 +2807,7 @@ fn title(app: &App) -> String {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Command => "COMMAND",
+        Mode::Search => "SEARCH",
     };
 
     format!(" {}{} - {} ", name, mark, mode)
@@ -3644,6 +3922,151 @@ mod tests {
         app.toggle_source_view();
         press(&mut app, ":10\n");
         assert_eq!(app.cursor, 9);
+    }
+
+    /// / ? n N * # と正規表現・smartcase・折り返し。
+    #[test]
+    fn search() {
+        let mut app = App::new();
+        press(&mut app, "iapple");
+        for word in ["Banana", "cherry", "apple2", "date"]
+        {
+            press(&mut app, &format!("\n{}", word));
+        }
+        press(&mut app, "\x1b");
+        assert_eq!(app.nodes.len(), 5);
+        // apple(0) Banana(1) cherry(2) apple2(3) date(4)
+
+        app.cursor = 0;
+
+        // smartcase: 小文字だけのパターンは大文字小文字を
+        // 無視する。
+        press(&mut app, "/banana\n");
+        assert_eq!(app.cursor, 1);
+
+        // 正規表現として解釈される。
+        press(&mut app, "/^date$\n");
+        assert_eq!(app.cursor, 4);
+
+        // 末尾から前方検索すると先頭へ折り返す。
+        press(&mut app, "/apple\n");
+        assert_eq!(app.cursor, 0);
+        assert!(app.message.contains("折り返"));
+
+        // n は同じ方向・同じパターンで繰り返す。
+        press(&mut app, "n");
+        assert_eq!(app.cursor, 3);
+        assert!(!app.message.contains("折り返"));
+
+        // N は逆方向だが、n・N を繰り返しても検索の
+        // 基準方向（前方）自体は変わらない。
+        //
+        // x1(0) a(1) b(2) x2(3) c(4) x3(5) d(6)を使う。
+        // カーソルをx2(3)に置いて前方検索し、Nで逆方向、
+        // 続くnで前方に戻ることを確かめる。Nがlast_search
+        // の方向を書き換えてしまう不具合があると、
+        // 2回目のnも逆方向のまま止まってしまう。
+        let mut app2 = insert("x1");
+        for word in ["a", "b", "x2", "c", "x3", "d"] {
+            press(&mut app2, &format!("\n{}", word));
+        }
+        press(&mut app2, "\x1b");
+        app2.cursor = 0;
+        press(&mut app2, "/x\n");
+        assert_eq!(app2.cursor, 3);
+        press(&mut app2, "N");
+        assert_eq!(app2.cursor, 0);
+        press(&mut app2, "n");
+        assert_eq!(app2.cursor, 3);
+
+        // * はカーソルのノードのテキストをそのまま
+        // パターンにする。
+        app.cursor = 4;
+        press(&mut app, "*");
+        // dateは1つしか無いので自分自身に戻ってくる。
+        assert_eq!(app.cursor, 4);
+
+        // ? は後方検索。
+        app.cursor = 2;
+        press(&mut app, "?apple\n");
+        assert_eq!(app.cursor, 0);
+
+        // 見つからなければメッセージを出し、カーソルは
+        // 動かさない。
+        app.cursor = 2;
+        press(&mut app, "/nonexistentxyz\n");
+        assert_eq!(app.cursor, 2);
+        assert!(app.message.contains("見つかりません"));
+
+        // 不正な正規表現もメッセージを出す。
+        app.cursor = 2;
+        press(&mut app, "/[\n");
+        assert_eq!(app.cursor, 2);
+        assert!(app.message.contains("不正"));
+
+        // Escで検索を取り消す。
+        press(&mut app, "/apple");
+        assert_eq!(app.mode, Mode::Search);
+        press(&mut app, "\x1b");
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.cursor, 2);
+    }
+
+    /// vimの既定`/`に合わせ、? + ( ) { } | はエスケープ
+    /// 無しならリテラル、エスケープすると特殊になる。
+    /// \/ はエスケープしても文字通りのスラッシュ。
+    #[test]
+    fn search_vim_pattern_translation() {
+        let mut app = insert("start");
+        for word in ["lis", "list?", "a(b)c", "a/b"] {
+            press(&mut app, &format!("\n{}", word));
+        }
+        press(&mut app, "\x1b");
+        assert_eq!(app.nodes.len(), 5);
+        // start(0) lis(1) list?(2) a(b)c(3) a/b(4)
+
+        // エスケープ無しの ? はリテラル。"lis" は
+        // 素通りして "list?" だけにヒットする。
+        app.cursor = 0;
+        press(&mut app, "/list?\n");
+        assert_eq!(app.cursor, 2);
+
+        // \? はvimと同じくRustの特殊文字になる
+        // （直前の1文字が0か1回）。"list?" より手前の
+        // "lis" がヒットする。
+        app.cursor = 0;
+        press(&mut app, "/list\\?\n");
+        assert_eq!(app.cursor, 1);
+
+        // エスケープ無しの ( ) もリテラル。
+        // 変換していなければグループ化として扱われ、
+        // "a(b)c" ではなく "abc" を探すことになり
+        // 見つからない。
+        app.cursor = 0;
+        press(&mut app, "/a(b)c\n");
+        assert_eq!(app.cursor, 3);
+
+        // \/ はエスケープしても文字通りのスラッシュ
+        // として検索できる（vimと同じ書き方が使える）。
+        app.cursor = 0;
+        press(&mut app, "/a\\/b\n");
+        assert_eq!(app.cursor, 4);
+
+        // \= は\?のvimでの別表記で、同じ意味になる。
+        app.cursor = 0;
+        press(&mut app, "/list\\=\n");
+        assert_eq!(app.cursor, 1);
+
+        // \a はvimでは英字1文字。数字だけの"123"は
+        // 飛ばして、英字の"word"にヒットする。ベル文字
+        // (0x07)というRust regexの本来の意味のままだと
+        // どちらにもヒットしない。
+        let mut app3 = insert("123");
+        press(&mut app3, "\nword");
+        press(&mut app3, "\x1b");
+        app3.cursor = 0;
+        press(&mut app3, "/\\a\n");
+        assert_eq!(app3.cursor, 1);
     }
 
     /// Y と D は部分木ごと。
