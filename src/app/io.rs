@@ -1,0 +1,209 @@
+use super::App;
+use crate::node::nodes_from;
+use crate::reader;
+
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+
+impl App {
+    /// :で始まる1行を実行する。
+    pub(crate) fn run_command(&mut self, line: &str) {
+        let mut words = line.split_whitespace();
+
+        let Some(name) = words.next() else {
+            return;
+        };
+
+        // :42 で42行目へ、:$ で末尾へ。
+        let line = match name {
+            "$" => Some(usize::MAX),
+            _ => name.parse::<usize>().ok(),
+        };
+
+        if let Some(line) = line {
+            self.move_to(line.saturating_sub(1));
+            return;
+        }
+
+        if name == "set" {
+            // :set number nonumber のように並べられる。
+            let options: Vec<&str> = words.collect();
+            if options.is_empty() {
+                self.message =
+                    "設定項目がありません".to_string();
+                return;
+            }
+            for option in options {
+                self.set_option(option);
+            }
+            return;
+        }
+
+        let argument = words.next();
+
+        match name {
+            "w" => {
+                self.write(argument);
+            }
+            "wq" | "x" => {
+                if self.write(argument) {
+                    self.quit = true;
+                }
+            }
+            "q" => {
+                if self.modified {
+                    self.message =
+                        "変更が保存されていません。\
+                         捨てるなら :q! です"
+                            .to_string();
+                } else {
+                    self.quit = true;
+                }
+            }
+            "q!" => self.quit = true,
+            "e" => {
+                self.edit(argument);
+            }
+            "e!" => {
+                self.modified = false;
+                self.edit(argument);
+            }
+            _ => {
+                self.message =
+                    format!("不明なコマンドです: {}", name)
+            }
+        }
+    }
+
+    /// :set の項目を1つ処理する。
+    pub(crate) fn set_option(&mut self, option: &str) {
+        match option {
+            "number" | "nu" => self.number = true,
+            "nonumber" | "nonu" => self.number = false,
+            "number!" | "nu!" => {
+                self.number = !self.number
+            }
+            _ => {
+                self.message = format!(
+                    "不明な設定項目です: {}",
+                    option
+                )
+            }
+        }
+    }
+
+    /// ファイルを読む。読めたらtrueを返す。
+    pub(crate) fn edit(&mut self, argument: Option<&str>) -> bool {
+        if self.modified {
+            self.message =
+                "変更が保存されていません。\
+                 捨てるなら :e! です"
+                    .to_string();
+            return false;
+        }
+
+        if let Some(name) = argument {
+            self.path = Some(PathBuf::from(name));
+        }
+
+        let Some(path) = self.path.clone() else {
+            self.message =
+                "ファイル名がありません".to_string();
+            return false;
+        };
+
+        self.load(&path)
+    }
+
+    pub(crate) fn load(&mut self, path: &Path) -> bool {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.message =
+                    format!("読めません: {}", error);
+                return false;
+            }
+        };
+
+        let reading = match reader::read(&text) {
+            Ok(reading) => reading,
+            Err(error) => {
+                self.message = format!(
+                    "{} を読めません: {}",
+                    path.display(),
+                    error
+                );
+                return false;
+            }
+        };
+
+        self.nodes = nodes_from(&reading.data);
+        self.cursor = 0;
+        self.cursor_col = 0;
+        self.modified = false;
+        // ソース表示中に別ファイルを開くと食い違うので、
+        // 木の表示に戻す。
+        self.source_mode = false;
+        // ファイルが入れ替わるので履歴は捨てる。
+        self.undo.clear();
+        self.redo.clear();
+        self.held = None;
+
+        self.message = if reading.hoisted > 0 {
+            format!(
+                "{} を読みました。\
+                 式の中にあったコメント{}件を\
+                 行頭に出しました",
+                path.display(),
+                reading.hoisted
+            )
+        } else {
+            format!("{} を読みました", path.display())
+        };
+
+        true
+    }
+
+    /// ファイルに書く。書けたらtrueを返す。
+    pub(crate) fn write(&mut self, argument: Option<&str>) -> bool {
+        if let Some(name) = argument {
+            self.path = Some(PathBuf::from(name));
+        }
+
+        let Some(path) = self.path.clone() else {
+            self.message =
+                "ファイル名がありません".to_string();
+            return false;
+        };
+
+        // ソース表示中はdepth:0のフラットな行なので、
+        // to_scheme()に通さずそのまま連結する。
+        let mut text = if self.source_mode {
+            self.nodes
+                .iter()
+                .map(|node| node.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            self.to_scheme()
+        };
+        text.push('\n');
+
+        match fs::write(&path, text) {
+            Ok(()) => {
+                self.modified = false;
+                self.message = format!(
+                    "{} に書き込みました",
+                    path.display()
+                );
+                true
+            }
+            Err(error) => {
+                self.message =
+                    format!("書き込めません: {}", error);
+                false
+            }
+        }
+    }
+}
