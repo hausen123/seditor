@@ -1236,6 +1236,9 @@ impl App {
         };
 
         self.move_to(index);
+        // F2と同じく、ヒットしたノードが画面の下端に
+        // 埋もれて見づらくならないよう中央へ寄せる。
+        self.center_on_cursor();
 
         self.message = if wrapped && forward {
             "検索は末尾から先頭へ折り返しました"
@@ -4880,6 +4883,34 @@ mod tests {
 
         // 木に戻すときも同様。
         app.toggle_source_view();
+        assert_eq!(app.scroll + app.height / 2, app.cursor);
+    }
+
+    /// 検索でヒットしたノードもF2と同じく画面中央へ
+    /// 寄る。末尾の方でヒットしても下端に埋もれない。
+    #[test]
+    fn search_centers_cursor() {
+        let mut terminal = Terminal::new(
+            ratatui::backend::TestBackend::new(20, 10),
+        )
+        .unwrap();
+        let mut app = App::new();
+        press(&mut app, "i0");
+        for n in 1..30 {
+            press(&mut app, &format!("\n{}", n));
+        }
+        press(&mut app, "\x1b");
+        // 高さ7の画面。先頭から末尾付近の"25"を検索。
+        screen(&mut terminal, &mut app);
+        app.cursor = 0;
+        press(&mut app, "/25\n");
+        assert_eq!(app.cursor, 25);
+        assert_eq!(app.scroll + app.height / 2, app.cursor);
+
+        // n で移動したときも同様。
+        press(&mut app, ":0\n");
+        press(&mut app, "n");
+        assert_eq!(app.cursor, 25);
         assert_eq!(app.scroll + app.height / 2, app.cursor);
     }
 
