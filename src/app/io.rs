@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 impl App {
     /// :で始まる1行を実行する。
-    pub(crate) fn run_command(&mut self, line: &str) {
+    pub(super) fn run_command(&mut self, line: &str) {
         let mut words = line.split_whitespace();
 
         let Some(name) = words.next() else {
@@ -77,7 +77,7 @@ impl App {
     }
 
     /// :set の項目を1つ処理する。
-    pub(crate) fn set_option(&mut self, option: &str) {
+    fn set_option(&mut self, option: &str) {
         match option {
             "number" | "nu" => self.number = true,
             "nonumber" | "nonu" => self.number = false,
@@ -94,7 +94,7 @@ impl App {
     }
 
     /// ファイルを読む。読めたらtrueを返す。
-    pub(crate) fn edit(&mut self, argument: Option<&str>) -> bool {
+    fn edit(&mut self, argument: Option<&str>) -> bool {
         if self.modified {
             self.message =
                 "変更が保存されていません。\
@@ -116,7 +116,7 @@ impl App {
         self.load(&path)
     }
 
-    pub(crate) fn load(&mut self, path: &Path) -> bool {
+    pub(super) fn load(&mut self, path: &Path) -> bool {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) => {
@@ -166,7 +166,7 @@ impl App {
     }
 
     /// ファイルに書く。書けたらtrueを返す。
-    pub(crate) fn write(&mut self, argument: Option<&str>) -> bool {
+    fn write(&mut self, argument: Option<&str>) -> bool {
         if let Some(name) = argument {
             self.path = Some(PathBuf::from(name));
         }

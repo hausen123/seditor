@@ -1,10 +1,9 @@
 mod app;
 mod node;
 mod reader;
-mod ui;
 
+use app::draw;
 use app::App;
-use ui::draw;
 
 use std::io;
 use std::path::PathBuf;
@@ -76,10 +75,7 @@ fn run(
     let mut app = App::new();
 
     if let Some(path) = path {
-        if path.exists() {
-            app.load(&path);
-        }
-        app.path = Some(path);
+        app.open(path);
     }
 
     loop {
@@ -111,6 +107,3 @@ fn run(
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

@@ -16,7 +16,7 @@ use ratatui::text::Span;
 
 impl App {
     /// F2。木とソース表示を切り替える。
-    pub(crate) fn toggle_source_view(&mut self) {
+    pub(super) fn toggle_source_view(&mut self) {
         if self.source_mode {
             self.source_to_tree();
         } else {
@@ -30,7 +30,7 @@ impl App {
     /// エンジン（insert_char、undo、カーソル反転など）
     /// をそのまま使い回す。カーソルは、印字したときに
     /// 元のノードが始まった行・桁に合わせる。
-    pub(crate) fn tree_to_source(&mut self) {
+    fn tree_to_source(&mut self) {
         let (source, positions) =
             self.to_scheme_with_positions();
 
@@ -104,7 +104,7 @@ impl App {
     /// パースに失敗したらソース表示に留まる。カーソルは
     /// 今いた行以下で一番近いノードに合わせる。桁までは
     /// 対応しない（1行に複数ノードが同居しうるため）。
-    pub(crate) fn source_to_tree(&mut self) {
+    fn source_to_tree(&mut self) {
         let text: String = self
             .nodes
             .iter()
@@ -136,7 +136,7 @@ impl App {
         self.center_on_cursor();
     }
 
-    pub(crate) fn tree_lines(&self) -> Vec<String> {
+    pub(super) fn tree_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
         for index in 0..self.nodes.len() {
@@ -166,7 +166,7 @@ impl App {
     /// カーソルの記号を挿し込むと桁がずれるので、
     /// 文字数を変えずに見せる。見切れた行には
     /// 端に印を出す（vimのnowrap + listcharsに近い）。
-    pub(crate) fn tree_display(&self) -> Vec<Line<'static>> {
+    pub(super) fn tree_display(&self) -> Vec<Line<'static>> {
         let highlight = Style::default()
             .add_modifier(Modifier::REVERSED);
 
@@ -266,7 +266,7 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn tree_prefix(&self, index: usize) -> String {
+    pub(super) fn tree_prefix(&self, index: usize) -> String {
         let depth = self.nodes[index].depth;
 
         if depth == 0 {
@@ -300,7 +300,7 @@ impl App {
     /// indexの祖先のうち、深さlevel+1のものを返す。
     ///
     /// levelは罫線の桁番号で、左端が0。
-    pub(crate) fn find_ancestor(
+    fn find_ancestor(
         &self,
         index: usize,
         level: usize,
@@ -320,7 +320,7 @@ impl App {
         0
     }
 
-    pub(crate) fn has_next_sibling(&self, index: usize) -> bool {
+    fn has_next_sibling(&self, index: usize) -> bool {
         let depth = self.nodes[index].depth;
 
         for i in index + 1..self.nodes.len() {
@@ -338,7 +338,7 @@ impl App {
         false
     }
 
-    pub(crate) fn is_last_sibling(&self, index: usize) -> bool {
+    fn is_last_sibling(&self, index: usize) -> bool {
         !self.has_next_sibling(index)
     }
 
@@ -359,7 +359,7 @@ impl App {
     ///   (* x x))
     ///
     /// にする。
-    pub(crate) fn to_scheme(&self) -> String {
+    pub(super) fn to_scheme(&self) -> String {
         self.to_scheme_with_positions().0
     }
 
@@ -371,7 +371,7 @@ impl App {
     /// 埋もれて記録されない。木とソース表示を
     /// 切り替えるとき、カーソルの対応する位置を
     /// 探すのに使う。
-    pub(crate) fn to_scheme_with_positions(
+    fn to_scheme_with_positions(
         &self,
     ) -> (String, Vec<Option<(usize, usize)>>) {
         let mut output = String::new();
@@ -396,7 +396,7 @@ impl App {
 
     /// indexの位置。記録が無ければ、畳んだ親を
     /// 見つかるまで手前へ探す。
-    pub(crate) fn position_of(
+    fn position_of(
         index: usize,
         positions: &[Option<(usize, usize)>],
     ) -> (usize, usize) {
@@ -418,7 +418,7 @@ impl App {
     /// 記録の中から、target行以下で一番近いノードを
     /// 探す。ソース表示の行番号から、対応する木の
     /// ノードへ戻るときに使う。
-    pub(crate) fn node_at_line(
+    fn node_at_line(
         positions: &[Option<(usize, usize)>],
         target: usize,
     ) -> usize {
@@ -442,7 +442,7 @@ impl App {
     }
 
     /// indexの直接の子を列挙する。
-    pub(crate) fn children(&self, index: usize) -> Vec<usize> {
+    pub(super) fn children(&self, index: usize) -> Vec<usize> {
         let depth = self.nodes[index].depth;
         let mut result = Vec::new();
         let mut i = index + 1;
@@ -467,7 +467,7 @@ impl App {
     /// '`x`（連なりがアトムに畳まれた形）のように
     /// 記号の後に文字が続くものは、この判定を通らず
     /// ただのアトムとして扱われる。#t や #\a も同様。
-    pub(crate) fn is_marker(&self, index: usize) -> bool {
+    fn is_marker(&self, index: usize) -> bool {
         let text = self.nodes[index].text.trim();
         matches!(
             text,
@@ -480,7 +480,7 @@ impl App {
     /// indexのS式を改行なしで書き出す。
     ///
     /// 幅に収まるかどうかの判定に使う。
-    pub(crate) fn flat(&self, index: usize) -> String {
+    fn flat(&self, index: usize) -> String {
         let text = self.nodes[index].text.trim();
         let children = self.children(index);
         if self.is_marker(index) {
@@ -521,7 +521,7 @@ impl App {
         format!("({})", parts.join(" "))
     }
 
-    pub(crate) fn indent_style(&self, index: usize) -> Indent {
+    fn indent_style(&self, index: usize) -> Indent {
         let text = self.nodes[index].text.trim();
         // 名前付きlet (let loop ((i 0)) ...) は
         // 名前と束縛リストの2つを見出し行に置く。
@@ -554,7 +554,7 @@ impl App {
     /// 開始桁はoutputの末尾から求めるので、
     /// 呼ぶ側は字下げの空白を書いてから渡すこと。
     /// positionsにindexの開始位置を記録する。
-    pub(crate) fn write_pretty(
+    fn write_pretty(
         &self,
         index: usize,
         output: &mut String,
@@ -656,7 +656,7 @@ impl App {
     }
 
     /// 残りの子を1行ずつcolumn桁から書き出す。
-    pub(crate) fn write_children(
+    fn write_children(
         &self,
         children: &[usize],
         column: usize,

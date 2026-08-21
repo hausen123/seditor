@@ -1,10 +1,11 @@
-use crate::app::App;
-use crate::app::Mode;
+use super::App;
+use super::Mode;
 use crate::node::nodes_from;
 use crate::node::number_width;
 use crate::reader;
-use crate::ui::draw;
-use crate::ui::title;
+
+use super::ui::draw;
+use super::ui::title;
 
 use std::fs;
 

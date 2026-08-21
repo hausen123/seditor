@@ -4,7 +4,7 @@ use crate::node::Node;
 
 impl App {
     /// カーソルの1つ上に同じ深さの空ノードを作る。
-    pub(crate) fn open_above(&mut self) {
+    pub(super) fn open_above(&mut self) {
         let depth = self.nodes[self.cursor].depth;
         self.nodes.insert(
             self.cursor,
@@ -22,7 +22,7 @@ impl App {
     /// ◦ には消す文字が無いので、ddと同じく
     /// ノードごと消して子を1段持ち上げる。
     /// yankはNormalモードのxのときだけtrue。
-    pub(crate) fn delete_char(&mut self, yank: bool) {
+    pub(super) fn delete_char(&mut self, yank: bool) {
         if self.text().is_empty() {
             self.delete_node(1, yank);
             return;
@@ -60,7 +60,7 @@ impl App {
         }
     }
 
-    pub(crate) fn insert_char(&mut self, c: char) {
+    pub(super) fn insert_char(&mut self, c: char) {
         let node = &mut self.nodes[self.cursor];
 
         node.text.insert(self.cursor_col, c);
@@ -70,7 +70,7 @@ impl App {
 
     /// 貼り付けたテキストをカーソル位置に反映する。
     /// 改行のたびにEnterと同じくノードを分ける。
-    pub(crate) fn paste_text(&mut self, text: &str) {
+    pub(super) fn paste_text(&mut self, text: &str) {
         // \r\n の \r は無視する。
         let text = text.replace('\r', "");
         let mut lines = text.split('\n');
@@ -94,7 +94,7 @@ impl App {
     /// ◦ の上ではノードごと消して、前のノードの
     /// 末尾に戻る。Enterを取り消す動きになる。
     /// レジスタは汚さない。
-    pub(crate) fn backspace(&mut self) {
+    pub(super) fn backspace(&mut self) {
         if self.text().is_empty() {
             if self.cursor == 0 {
                 self.delete_node(1, false);
@@ -167,7 +167,7 @@ impl App {
     ///
     /// 文の途中でEnterしたとき、その場で分かれる
     /// ようにする。カーソルが末尾なら次は空になる。
-    pub(crate) fn enter(&mut self) {
+    pub(super) fn enter(&mut self) {
         let depth = self.nodes[self.cursor].depth;
         let column = self.cursor_col;
 
@@ -189,7 +189,7 @@ impl App {
     /// 深さを変える操作は意味を持たない上に、上限計算
     /// （直前ノード+1）が常に1になり簡単に罫線が
     /// 出てきてしまう。無効にする。
-    pub(crate) fn indent(&mut self) {
+    pub(super) fn indent(&mut self) {
         if self.source_mode || self.cursor == 0 {
             return;
         }
@@ -206,7 +206,7 @@ impl App {
         }
     }
 
-    pub(crate) fn unindent(&mut self) {
+    pub(super) fn unindent(&mut self) {
         if !self.source_mode
             && self.nodes[self.cursor].depth > 0
         {
@@ -220,7 +220,7 @@ impl App {
     /// indent()をカーソルのノードだけに使うと、
     /// 子孫の深さは変わらないまま親子関係が崩れる。
     /// 上限はindent()と同じ。
-    pub(crate) fn indent_subtree(&mut self) {
+    pub(super) fn indent_subtree(&mut self) {
         if self.source_mode || self.cursor == 0 {
             return;
         }
@@ -245,7 +245,7 @@ impl App {
     }
 
     /// カーソルの部分木を子孫ごと1段上げる。
-    pub(crate) fn unindent_subtree(&mut self) {
+    pub(super) fn unindent_subtree(&mut self) {
         if self.source_mode
             || self.nodes[self.cursor].depth == 0
         {
@@ -261,7 +261,7 @@ impl App {
         self.record();
     }
 
-    pub(crate) fn move_up(&mut self) {
+    pub(super) fn move_up(&mut self) {
         if self.cursor == 0 {
             return;
         }
@@ -273,7 +273,7 @@ impl App {
         );
     }
 
-    pub(crate) fn move_down(&mut self) {
+    pub(super) fn move_down(&mut self) {
         if self.cursor + 1 >= self.nodes.len() {
             return;
         }
@@ -285,7 +285,7 @@ impl App {
         );
     }
 
-    pub(crate) fn move_left(&mut self) {
+    pub(super) fn move_left(&mut self) {
         if self.cursor_col == 0 {
             return;
         }
@@ -299,7 +299,7 @@ impl App {
         }
     }
 
-    pub(crate) fn move_right(&mut self) {
+    pub(super) fn move_right(&mut self) {
         let len = self.nodes[self.cursor].text.len();
 
         if self.cursor_col >= len {
@@ -324,7 +324,7 @@ impl App {
     /// 1ノードの削除に当てると「子を1段持ち上げる」に
     /// なり、複数まとめて消したときの穴も同じ規則で
     /// 塞がる。
-    pub(crate) fn repair(&mut self) {
+    fn repair(&mut self) {
         for i in 0..self.nodes.len() {
             let limit = if i == 0 {
                 0
@@ -342,7 +342,7 @@ impl App {
     /// yankがtrueなら消したぶんをレジスタに入れる。
     /// Backspace/Deleteはレジスタを汚さないよう
     /// falseで呼ぶ。子は深さの復元によって持ち上がる。
-    pub(crate) fn delete_node(&mut self, count: usize, yank: bool) {
+    pub(super) fn delete_node(&mut self, count: usize, yank: bool) {
         let end = (self.cursor + count)
             .min(self.nodes.len());
 
@@ -380,7 +380,7 @@ impl App {
     /// indexの部分木の直後の位置。
     ///
     /// 深さがindexと同じか浅くなる手前まで。
-    pub(crate) fn subtree_end(&self, index: usize) -> usize {
+    fn subtree_end(&self, index: usize) -> usize {
         let depth = self.nodes[index].depth;
         let mut i = index + 1;
 
@@ -397,12 +397,12 @@ impl App {
     ///
     /// Y と D はこれを個数として渡すので、
     /// yank と delete_node をそのまま使える。
-    pub(crate) fn subtree_len(&self) -> usize {
+    pub(super) fn subtree_len(&self) -> usize {
         self.subtree_end(self.cursor) - self.cursor
     }
 
     /// カーソルから count 個のノードをヤンクする。
-    pub(crate) fn yank(&mut self, count: usize) {
+    pub(super) fn yank(&mut self, count: usize) {
         let end = (self.cursor + count)
             .min(self.nodes.len());
 
@@ -427,7 +427,7 @@ impl App {
     ///
     /// 根をカーソルと同じ深さに置くので、
     /// 深さが飛ぶことはない。
-    pub(crate) fn paste(&mut self, before: bool, count: usize) {
+    pub(super) fn paste(&mut self, before: bool, count: usize) {
         let register = if self.source_mode {
             self.source_register.clone()
         } else {

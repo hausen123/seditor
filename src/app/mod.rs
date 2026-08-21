@@ -2,7 +2,13 @@ mod editing;
 mod io;
 mod input;
 mod search;
+mod ui;
 mod view;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use ui::draw;
 
 use crate::node::Node;
 
@@ -14,7 +20,7 @@ use ratatui::widgets::Wrap;
 
 /// 巻き戻すために丸ごと控えておく状態。
 #[derive(Clone)]
-pub(crate) struct Snapshot {
+struct Snapshot {
     nodes: Vec<Node>,
     cursor: usize,
     cursor_col: usize,
@@ -25,7 +31,7 @@ pub(crate) struct Snapshot {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum Mode {
+enum Mode {
     Normal,
     Insert,
     Command,
@@ -33,52 +39,52 @@ pub(crate) enum Mode {
 }
 
 pub(crate) struct App {
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) cursor: usize,
-    pub(crate) cursor_col: usize,
-    pub(crate) source_mode: bool,
-    pub(crate) mode: Mode,
+    nodes: Vec<Node>,
+    cursor: usize,
+    cursor_col: usize,
+    source_mode: bool,
+    mode: Mode,
     /// dd や >> の1打鍵目。
-    pub(crate) pending: Option<char>,
+    pending: Option<char>,
     /// :の入力中の文字列。:は含まない。
-    pub(crate) command: String,
+    command: String,
     /// / や ? の入力中の文字列。記号自体は含まない。
-    pub(crate) search: String,
+    search: String,
     /// 入力中・直前の検索が前方（/）か後方（?）か。
-    pub(crate) search_forward: bool,
+    search_forward: bool,
     /// n・N で繰り返すための直前の検索。
     /// パターンと方向（trueなら前方）を持つ。
-    pub(crate) last_search: Option<(String, bool)>,
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) modified: bool,
+    last_search: Option<(String, bool)>,
+    path: Option<PathBuf>,
+    modified: bool,
     /// 画面下に出す一言。
-    pub(crate) message: String,
-    pub(crate) quit: bool,
-    pub(crate) undo: Vec<Snapshot>,
-    pub(crate) redo: Vec<Snapshot>,
+    message: String,
+    quit: bool,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     /// ヤンクした内容。深さは0からの相対値。
-    pub(crate) register: Vec<Node>,
+    register: Vec<Node>,
     /// ソース表示用の別レジスタ。
     ///
     /// 木の部分木をそのままソース表示に貼ると、
     /// 相対深さが混ざって表示が崩れるので分けてある。
-    pub(crate) source_register: Vec<Node>,
+    source_register: Vec<Node>,
     /// 数字を溜めた回数指定。
-    pub(crate) count: Option<usize>,
+    count: Option<usize>,
     /// 行番号を出すか。:set number で切り替える。
-    pub(crate) number: bool,
+    number: bool,
     /// 画面最上部の行番号。
-    pub(crate) scroll: usize,
+    scroll: usize,
     /// 木の表示の横スクロール位置（列数）。
     ///
     /// 行番号ガターは対象外で、全行共通の1本。
     /// 行ごとに別々にすると罫線がずれる。
-    pub(crate) h_scroll: usize,
+    h_scroll: usize,
     /// 枠の内側の行数。描画時に入る。
-    pub(crate) height: usize,
+    height: usize,
     /// 木の表示でガターを除いた横の文字数。
     /// 描画時に入る。
-    pub(crate) width: usize,
+    width: usize,
     /// 各ノードが画面上で何行目から始まるか。
     ///
     /// scroll/height/カーソル追従は、ノード番号では
@@ -90,14 +96,14 @@ pub(crate) struct App {
     /// scrollの単位（画面行）とノード番号がずれ、
     /// カーソルが画面外に描画されることがある。
     /// 描画時に入る。
-    pub(crate) row_offsets: Vec<usize>,
+    row_offsets: Vec<usize>,
     /// 折り返した後の全体行数。描画時に入る。
-    pub(crate) total_rows: usize,
+    total_rows: usize,
     /// 編集の区切りで取った控え。
     ///
     /// 実際に変更が起きるまでundoには積まない。
     /// 何もしなかった i → Esc で空の段を作らないため。
-    pub(crate) held: Option<Snapshot>,
+    held: Option<Snapshot>,
 }
 
 /// 積んでおくアンドゥの段数。
@@ -141,12 +147,23 @@ impl App {
         }
     }
 
+    /// 起動時にファイルを開く。
+    ///
+    /// 存在すれば読み込み、存在しなければ新規ファイルの
+    /// パスとして保持するだけにする。
+    pub(crate) fn open(&mut self, path: PathBuf) {
+        if path.exists() {
+            self.load(&path);
+        }
+        self.path = Some(path);
+    }
+
     /// row_offsets/total_rowsを最新にする。
     ///
     /// widthは実際にParagraphへ渡る幅（枠を除いた分）と
     /// 一致させること。ずれるとratatuiの折り返し計算と
     /// 食い違い、この仕組み自体が無意味になる。
-    pub(crate) fn refresh_row_offsets(&mut self, width: u16) {
+    fn refresh_row_offsets(&mut self, width: u16) {
         let mut offsets =
             Vec::with_capacity(self.nodes.len());
         let mut total = 0;
@@ -183,7 +200,7 @@ impl App {
     /// カーソルの画面上の行。row_offsetsが古い
     /// （draw()をまだ通していない）場合はcursorを
     /// そのまま使う。
-    pub(crate) fn cursor_row(&self) -> usize {
+    fn cursor_row(&self) -> usize {
         self.row_offsets
             .get(self.cursor)
             .copied()
@@ -194,7 +211,7 @@ impl App {
     /// 画面行数。無効なときはノード数をそのまま使う
     /// （height==0のときのfollow_cursor()と同じ
     /// 考え方）。
-    pub(crate) fn total_rows(&self) -> usize {
+    fn total_rows(&self) -> usize {
         if self.row_offsets.len() == self.nodes.len() {
             self.total_rows
         } else {
@@ -208,7 +225,7 @@ impl App {
     /// row_offsetsがまだ描画を経ておらずnodesと数が
     /// 合わないときは、cursor_row()/total_rows()と
     /// 同じく「1ノード=1行」とみなして素通しする。
-    pub(crate) fn node_at_row(&self, target: usize) -> usize {
+    fn node_at_row(&self, target: usize) -> usize {
         if self.row_offsets.len() != self.nodes.len() {
             return target;
         }
@@ -234,7 +251,7 @@ impl App {
     /// 画面行（row_offsets）を基準にする。ソース表示は
     /// 折り返すので、1ノードが複数行になることがあり、
     /// ノード番号をそのままscrollに使うとずれる。
-    pub(crate) fn follow_cursor(&mut self) {
+    fn follow_cursor(&mut self) {
         if self.height == 0 {
             return;
         }
@@ -251,7 +268,7 @@ impl App {
     ///
     /// 端では収まる範囲に収めるので、厳密に中央には
     /// ならないことがある（vimのzzと同じ）。
-    pub(crate) fn center_on_cursor(&mut self) {
+    fn center_on_cursor(&mut self) {
         if self.height == 0 {
             return;
         }
@@ -268,7 +285,7 @@ impl App {
     /// プレフィクスと、カーソルより手前のテキストを
     /// 文字数で数える。桁の単位はここでは文字数とし、
     /// 全角文字の幅は数えない（他の桁計算と同じ簡略化）。
-    pub(crate) fn cursor_column(&self, index: usize) -> usize {
+    fn cursor_column(&self, index: usize) -> usize {
         let prefix =
             self.tree_prefix(index).chars().count();
 
@@ -290,7 +307,7 @@ impl App {
     /// 差し引いた幅で判定する。そのまま width を使うと、
     /// 印を出したときにカーソルがちょうど印の裏に
     /// 隠れることがある。
-    pub(crate) fn follow_cursor_horizontal(&mut self) {
+    fn follow_cursor_horizontal(&mut self) {
         if self.width == 0 {
             return;
         }
@@ -311,7 +328,7 @@ impl App {
     /// カーソルを動かすだけではfollow_cursorが
     /// 最小限しか送らないので、scrollも直接動かす。
     /// 両方を同じだけ動かすと画面上の行が変わらない。
-    pub(crate) fn scroll_page(&mut self, lines: isize) {
+    fn scroll_page(&mut self, lines: isize) {
         let last_scroll = self
             .total_rows()
             .saturating_sub(self.height);
@@ -348,7 +365,7 @@ impl App {
     }
 
     /// カーソルまたは画面をlines行動かす。
-    pub(crate) fn scroll_by(&mut self, lines: isize) {
+    fn scroll_by(&mut self, lines: isize) {
         let last = self.nodes.len() - 1;
         self.cursor = self
             .cursor
@@ -358,7 +375,7 @@ impl App {
             self.cursor_col.min(self.text().len());
     }
 
-    pub(crate) fn snapshot(&self) -> Snapshot {
+    fn snapshot(&self) -> Snapshot {
         Snapshot {
             nodes: self.nodes.clone(),
             cursor: self.cursor,
@@ -372,7 +389,7 @@ impl App {
     /// 挿入モードに入るときと、Normalモードの
     /// 編集命令の直前に呼ぶ。挿入中は呼ばないので、
     /// i から Esc までが1段にまとまる。
-    pub(crate) fn begin_edit(&mut self) {
+    fn begin_edit(&mut self) {
         self.held = Some(self.snapshot());
     }
 
@@ -380,7 +397,7 @@ impl App {
     ///
     /// 控えがあれば1回だけ確定する。2文字目以降は
     /// 控えが空なので何もしない。
-    pub(crate) fn record(&mut self) {
+    fn record(&mut self) {
         self.modified = true;
 
         let Some(held) = self.held.take() else {
@@ -396,7 +413,7 @@ impl App {
         self.redo.clear();
     }
 
-    pub(crate) fn restore(&mut self, snapshot: Snapshot) {
+    fn restore(&mut self, snapshot: Snapshot) {
         self.nodes = snapshot.nodes;
         self.cursor = snapshot.cursor;
         self.cursor_col = snapshot.cursor_col;
@@ -405,7 +422,7 @@ impl App {
         self.modified = true;
     }
 
-    pub(crate) fn undo(&mut self) {
+    fn undo(&mut self) {
         let Some(snapshot) = self.undo.pop() else {
             self.message =
                 "これ以上戻れません".to_string();
@@ -416,7 +433,7 @@ impl App {
         self.restore(snapshot);
     }
 
-    pub(crate) fn redo(&mut self) {
+    fn redo(&mut self) {
         let Some(snapshot) = self.redo.pop() else {
             self.message =
                 "これ以上やり直せません".to_string();
@@ -428,11 +445,11 @@ impl App {
     }
 
     /// カーソルのあるノードのテキスト。
-    pub(crate) fn text(&self) -> &str {
+    fn text(&self) -> &str {
         &self.nodes[self.cursor].text
     }
 
-    pub(crate) fn move_to(&mut self, index: usize) {
+    fn move_to(&mut self, index: usize) {
         self.cursor = index.min(self.nodes.len() - 1);
         self.cursor_col =
             self.cursor_col.min(self.text().len());

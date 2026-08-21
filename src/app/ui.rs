@@ -1,5 +1,5 @@
-use crate::app::App;
-use crate::app::Mode;
+use super::App;
+use super::Mode;
 use crate::node::number_width;
 
 use ratatui::layout::Constraint;
@@ -92,7 +92,7 @@ pub(crate) fn draw(
 }
 
 /// ファイル名、変更の有無、モードを並べた見出し。
-pub(crate) fn title(app: &App) -> String {
+pub(super) fn title(app: &App) -> String {
     let name = match &app.path {
         Some(path) => path.display().to_string(),
         None => "[無名]".to_string(),

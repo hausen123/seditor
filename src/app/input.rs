@@ -78,7 +78,7 @@ impl App {
         !self.quit
     }
 
-    pub(crate) fn handle_command(&mut self, code: KeyCode) {
+    fn handle_command(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
                 self.command.clear();
@@ -101,7 +101,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_search(&mut self, code: KeyCode) {
+    fn handle_search(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
                 self.search.clear();
@@ -128,7 +128,7 @@ impl App {
     }
 
     /// モードによらない操作。処理したらtrueを返す。
-    pub(crate) fn handle_common(&mut self, code: KeyCode) -> bool {
+    fn handle_common(&mut self, code: KeyCode) -> bool {
         // 1画面送りは2行重ねる。
         let page =
             self.height.saturating_sub(2).max(1) as isize;
@@ -149,7 +149,7 @@ impl App {
         true
     }
 
-    pub(crate) fn handle_normal(&mut self, key: KeyEvent) {
+    fn handle_normal(&mut self, key: KeyEvent) {
         if key
             .modifiers
             .contains(KeyModifiers::CONTROL)
@@ -418,7 +418,7 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_insert(&mut self, code: KeyCode) {
+    fn handle_insert(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => self.mode = Mode::Normal,
             // ソース表示では罫線ではなく空白を入れる。

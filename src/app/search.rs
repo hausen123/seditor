@@ -71,7 +71,7 @@ impl App {
     ///
     /// 空文字なら直前のパターンを使う（vimの`//`と同じ）。
     /// 見つかったパターンは n・N のために覚えておく。
-    pub(crate) fn search_and_move(
+    pub(super) fn search_and_move(
         &mut self,
         pattern: &str,
         forward: bool,
@@ -100,7 +100,7 @@ impl App {
     /// same_directionがfalseなら逆方向。繰り返すたびに
     /// 基準の方向が変わらないよう、last_searchはここでは
     /// 更新しない。
-    pub(crate) fn repeat_search(&mut self, same_direction: bool) {
+    pub(super) fn repeat_search(&mut self, same_direction: bool) {
         let Some((pattern, forward)) =
             self.last_search.clone()
         else {
@@ -120,7 +120,7 @@ impl App {
 
     /// * と # 。カーソルのノードのテキストをそのまま
     /// （正規表現として特別扱いせず）パターンにする。
-    pub(crate) fn search_word(&mut self, forward: bool) {
+    pub(super) fn search_word(&mut self, forward: bool) {
         let text = self.text().to_string();
 
         if text.is_empty() {
@@ -140,7 +140,7 @@ impl App {
     /// 大文字を含まないパターンは大文字小文字を無視する
     /// （smartcase）。末尾/先頭まで探して見つからなければ
     /// 逆側から折り返す（wrapscan）。
-    pub(crate) fn perform_search(
+    fn perform_search(
         &mut self,
         pattern: &str,
         forward: bool,
