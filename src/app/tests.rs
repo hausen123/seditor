@@ -2059,3 +2059,368 @@ fn f2_at_bottom_keeps_cursor_visible() {
         "カーソルのセルが画面のどこにも見つかりません"
     );
 }
+
+/// wordsを兄弟ノードとして並べたAppを作る。
+fn nodes_app(words: &[&str]) -> App {
+    let mut app = App::new();
+    press(&mut app, &format!("i{}", words[0]));
+    for word in &words[1..] {
+        press(&mut app, &format!("\n{}", word));
+    }
+    press(&mut app, "\x1b");
+    app
+}
+
+/// :s の基本形。指定が無ければ最初の1件のみ、
+/// gフラグで全件。
+#[test]
+fn substitute_basic() {
+    let mut app = nodes_app(&["foofoo", "bar"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "Xfoo");
+    assert!(app.message.contains("1"));
+
+    let mut app = nodes_app(&["foofoo", "bar"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/g\n");
+    assert_eq!(app.nodes[0].text, "XX");
+    assert!(app.message.contains("2"));
+}
+
+/// i/Iフラグはsmartcaseの既定を上書きする。
+#[test]
+fn substitute_case_flags() {
+    // 既定のsmartcase: 小文字だけのパターンは
+    // 大文字小文字を無視するので"Foo"にヒットする。
+    // Iを付けると強制的に区別する。
+    let mut app = nodes_app(&["Foo"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/I\n");
+    assert_eq!(app.nodes[0].text, "Foo");
+    assert!(app.message.contains("見つかりません"));
+
+    // 大文字を含むパターンは既定で区別するので
+    // "foo"にはヒットしない。iを付けると無視する。
+    let mut app = nodes_app(&["foo"]);
+    app.cursor = 0;
+    press(&mut app, ":s/FOO/X/i\n");
+    assert_eq!(app.nodes[0].text, "X");
+}
+
+/// nフラグは件数だけ報告し、変更しない。
+#[test]
+fn substitute_n_flag() {
+    let mut app = nodes_app(&["foofoo"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/gn\n");
+    assert_eq!(app.nodes[0].text, "foofoo");
+    assert!(app.message.contains("2"));
+}
+
+/// eフラグはマッチ0件でもエラーを出さない。
+#[test]
+fn substitute_e_flag() {
+    let mut app = nodes_app(&["abc"]);
+    app.cursor = 0;
+    press(&mut app, ":s/xyz/Q/\n");
+    assert!(app.message.contains("見つかりません"));
+
+    let mut app = nodes_app(&["abc"]);
+    app.cursor = 0;
+    press(&mut app, ":s/xyz/Q/e\n");
+    assert!(!app.message.contains("見つかりません"));
+    assert_eq!(app.nodes[0].text, "abc");
+}
+
+/// rangeの各種指定。
+#[test]
+fn substitute_range() {
+    // 省略時はカーソルのノードのみ。
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 1;
+    press(&mut app, ":s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "foo");
+
+    // % は全ノード。
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "X");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "X");
+
+    // N,M は1始まりで両端含む。
+    let mut app =
+        nodes_app(&["foo", "foo", "foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":2,4s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "X");
+    assert_eq!(app.nodes[3].text, "X");
+    assert_eq!(app.nodes[4].text, "foo");
+
+    // N単独。
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":3s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "foo");
+    assert_eq!(app.nodes[2].text, "X");
+
+    // . と $ 。
+    let mut app =
+        nodes_app(&["foo", "foo", "foo", "foo", "foo"]);
+    app.cursor = 1;
+    press(&mut app, ":.,$s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "X");
+    assert_eq!(app.nodes[3].text, "X");
+    assert_eq!(app.nodes[4].text, "X");
+}
+
+/// \1〜\9・&（マッチ全体）の置換特殊表記。
+#[test]
+fn substitute_groups_and_whole() {
+    let mut app = nodes_app(&["abc123def456"]);
+    app.cursor = 0;
+    press(
+        &mut app,
+        ":s/\\(\\d\\+\\)/<\\1>/g\n",
+    );
+    assert_eq!(app.nodes[0].text, "abc<123>def<456>");
+
+    let mut app = nodes_app(&["abc123def456"]);
+    app.cursor = 0;
+    press(&mut app, ":s/\\d\\+/[&]/g\n");
+    assert_eq!(app.nodes[0].text, "abc[123]def[456]");
+}
+
+/// \u \U…\e \l \L…\E の大文字小文字変換。
+#[test]
+fn substitute_case_conversion() {
+    let mut app = nodes_app(&["hello world"]);
+    app.cursor = 0;
+    press(&mut app, ":s/hello/\\u&/\n");
+    assert_eq!(app.nodes[0].text, "Hello world");
+
+    let mut app = nodes_app(&["HELLO"]);
+    app.cursor = 0;
+    press(&mut app, ":s/HELLO/\\l&/\n");
+    assert_eq!(app.nodes[0].text, "hELLO");
+
+    let mut app = nodes_app(&["abc"]);
+    app.cursor = 0;
+    press(&mut app, ":s/abc/\\U&\\e-done/\n");
+    assert_eq!(app.nodes[0].text, "ABC-done");
+
+    let mut app = nodes_app(&["ABC"]);
+    app.cursor = 0;
+    press(&mut app, ":s/ABC/\\L&\\E-done/\n");
+    assert_eq!(app.nodes[0].text, "abc-done");
+}
+
+/// ~ は直前に使った置換文字列（生テキスト）を
+/// この位置に展開する。
+#[test]
+fn substitute_tilde_reuses_previous_replacement() {
+    let mut app = nodes_app(&["foo", "baz"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/BAR/\n");
+    assert_eq!(app.nodes[0].text, "BAR");
+    app.cursor = 1;
+    press(&mut app, ":s/baz/~/\n");
+    assert_eq!(app.nodes[1].text, "BAR");
+}
+
+/// :s//new/ はパターン省略時にlast_searchの
+/// パターンを使い、更新もしない。続く n でも
+/// 同じパターンが使える。
+#[test]
+fn substitute_reuses_last_search_pattern() {
+    let mut app = nodes_app(&["apple", "banana", "apple2"]);
+    app.cursor = 0;
+    press(&mut app, "/apple\n");
+    assert_eq!(app.cursor, 2);
+
+    press(&mut app, ":s//NEW/\n");
+    assert_eq!(app.nodes[2].text, "NEW2");
+
+    press(&mut app, "n");
+    assert_eq!(app.cursor, 0);
+}
+
+/// :& はフラグ無しで再実行、:&& はフラグも含めて
+/// 再実行する。
+#[test]
+fn substitute_ampersand_repeat() {
+    let mut app =
+        nodes_app(&["foofoo", "foofoo", "foofoo"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/g\n");
+    assert_eq!(app.nodes[0].text, "XX");
+
+    app.cursor = 1;
+    press(&mut app, ":&\n");
+    assert_eq!(app.nodes[1].text, "Xfoo");
+
+    app.cursor = 2;
+    press(&mut app, ":&&\n");
+    assert_eq!(app.nodes[2].text, "XX");
+}
+
+/// g& はNormalモードのキーで、直前の検索パターンと
+/// 直前の置換（トークン列・flags）を全ノードへ
+/// 再適用する。
+#[test]
+fn substitute_global_repeat_key() {
+    let mut app =
+        nodes_app(&["foofoo", "foofoo", "foofoo"]);
+    app.cursor = 0;
+    press(&mut app, ":s/foo/X/g\n");
+    assert_eq!(app.nodes[0].text, "XX");
+    assert_eq!(app.nodes[1].text, "foofoo");
+    assert_eq!(app.nodes[2].text, "foofoo");
+
+    press(&mut app, "g&");
+    assert_eq!(app.nodes[0].text, "XX");
+    assert_eq!(app.nodes[1].text, "XX");
+    assert_eq!(app.nodes[2].text, "XX");
+}
+
+/// cフラグの確認中、カーソルがマッチ開始位置に
+/// 乗るので画面上で選択箇所が分かる。
+#[test]
+fn substitute_confirm_shows_match_position() {
+    let mut app = nodes_app(&["xxfooxx", "xxfooxx"]);
+    app.cursor = 0;
+    app.cursor_col = 6;
+    press(&mut app, ":%s/foo/X/gc\n");
+    assert_eq!(app.cursor, 0);
+    assert_eq!(app.cursor_col, 2);
+
+    press(&mut app, "y");
+    assert_eq!(app.cursor, 1);
+    assert_eq!(app.cursor_col, 2);
+}
+
+/// cフラグの対話確認: y ですべて置換し、undoで
+/// 1段でまとめて戻る。
+#[test]
+fn substitute_confirm_yes_and_undo() {
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/c\n");
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.message.contains("置換しますか"));
+
+    press(&mut app, "y");
+    assert_eq!(app.mode, Mode::Confirm);
+    press(&mut app, "y");
+    assert_eq!(app.mode, Mode::Confirm);
+    press(&mut app, "y");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.nodes[0].text, "X");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "X");
+    assert!(app.message.contains("3"));
+
+    // 複数回yしても undo は1段にまとまる。
+    press(&mut app, "u");
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "foo");
+    assert_eq!(app.nodes[2].text, "foo");
+}
+
+/// cフラグ: n ですべて飛ばし、q で打ち切ると
+/// 何も変わらない。
+#[test]
+fn substitute_confirm_no_and_quit() {
+    let mut app = nodes_app(&["foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/c\n");
+    press(&mut app, "n");
+    assert_eq!(app.mode, Mode::Confirm);
+    press(&mut app, "q");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.nodes[0].text, "foo");
+    assert_eq!(app.nodes[1].text, "foo");
+    assert!(app.message.contains("0"));
+}
+
+/// cフラグ: l はその1件だけ置換して打ち切る。
+#[test]
+fn substitute_confirm_last() {
+    let mut app = nodes_app(&["foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/c\n");
+    press(&mut app, "l");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.nodes[0].text, "X");
+    assert_eq!(app.nodes[1].text, "foo");
+    assert!(app.message.contains("1"));
+}
+
+/// cフラグ: a は以降すべて確認無しで置換する。
+#[test]
+fn substitute_confirm_all() {
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/c\n");
+    press(&mut app, "a");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.nodes[0].text, "X");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "X");
+    assert!(app.message.contains("3"));
+    assert_eq!(app.cursor, 2);
+    assert_eq!(app.cursor_col, 0);
+}
+
+/// cフラグ無し（一括置換）でも、最後にマッチした
+/// 位置へカーソルが乗る。
+#[test]
+fn substitute_moves_cursor_to_last_match() {
+    let mut app = nodes_app(&["xxfooxx", "xxfooxx"]);
+    app.cursor = 0;
+    press(&mut app, ":%s/foo/X/\n");
+    assert_eq!(app.cursor, 1);
+    assert_eq!(app.cursor_col, 2);
+}
+
+/// cフラグでマッチが1件も無ければ、Confirmに入らず
+/// 通常の「見つからない」メッセージを出す。
+#[test]
+fn substitute_confirm_no_match() {
+    let mut app = nodes_app(&["abc"]);
+    app.cursor = 0;
+    press(&mut app, ":s/xyz/Q/c\n");
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.message.contains("見つかりません"));
+}
+
+/// 置換後、カーソルは最後にマッチしたノードへ移動し
+/// center_on_cursor()相当の位置になる。
+#[test]
+fn substitute_centers_cursor() {
+    let mut terminal = Terminal::new(
+        ratatui::backend::TestBackend::new(20, 10),
+    )
+    .unwrap();
+    let mut app = App::new();
+    press(&mut app, "i0");
+    for n in 1..30 {
+        press(&mut app, &format!("\n{}", n));
+    }
+    press(&mut app, "\x1b");
+    screen(&mut terminal, &mut app);
+    app.cursor = 0;
+    press(&mut app, ":%s/^25$/XX/\n");
+    assert_eq!(app.nodes[25].text, "XX");
+    assert_eq!(app.cursor, 25);
+    assert_eq!(app.scroll + app.height / 2, app.cursor);
+}

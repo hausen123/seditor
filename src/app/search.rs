@@ -17,7 +17,7 @@ use super::App;
 /// それ以外の文字（`.` `*` `^` `$` `[` `]` や `\d` の
 /// ようなエスケープ列）はvimとRustで扱いが同じなので
 /// そのまま通す。
-fn translate_vim_pattern(pattern: &str) -> String {
+pub(super) fn translate_vim_pattern(pattern: &str) -> String {
     const SWAP: [char; 7] =
         ['?', '+', '(', ')', '{', '}', '|'];
 

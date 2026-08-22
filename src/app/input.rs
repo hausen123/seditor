@@ -62,6 +62,12 @@ impl App {
             return !self.quit;
         }
 
+        // cフラグの対話確認中も同様。
+        if self.mode == Mode::Confirm {
+            self.handle_confirm(key.code);
+            return !self.quit;
+        }
+
         if self.handle_common(key.code) {
             return true;
         }
@@ -73,6 +79,7 @@ impl App {
             }
             Mode::Command => {}
             Mode::Search => {}
+            Mode::Confirm => {}
         }
 
         !self.quit
@@ -265,6 +272,9 @@ impl App {
                     self.unindent_subtree();
                 }
                 ('g', 'g') => self.move_to(0),
+                ('g', '&') => {
+                    self.global_repeat_substitute()
+                }
                 _ => {}
             }
             return;
@@ -415,6 +425,7 @@ impl App {
                 self.begin_edit();
                 self.paste_text(text);
             }
+            Mode::Confirm => {}
         }
     }
 

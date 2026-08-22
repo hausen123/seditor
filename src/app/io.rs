@@ -9,6 +9,13 @@ use std::path::PathBuf;
 impl App {
     /// :で始まる1行を実行する。
     pub(super) fn run_command(&mut self, line: &str) {
+        // :s / :& / :&& は空白やスラッシュを含みうる
+        // ので、split_whitespaceより先に専用パーサへ
+        // 通す。
+        if self.substitute_command(line) {
+            return;
+        }
+
         let mut words = line.split_whitespace();
 
         let Some(name) = words.next() else {

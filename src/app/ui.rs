@@ -107,6 +107,7 @@ pub(super) fn title(app: &App) -> String {
         Mode::Insert => "INSERT",
         Mode::Command => "COMMAND",
         Mode::Search => "SEARCH",
+        Mode::Confirm => "CONFIRM",
     };
 
     format!(" {}{} - {} ", name, mark, mode)

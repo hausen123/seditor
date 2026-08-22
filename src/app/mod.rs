@@ -2,6 +2,7 @@ mod editing;
 mod io;
 mod input;
 mod search;
+mod substitute;
 mod ui;
 mod view;
 
@@ -36,6 +37,7 @@ enum Mode {
     Insert,
     Command,
     Search,
+    Confirm,
 }
 
 pub(crate) struct App {
@@ -55,6 +57,11 @@ pub(crate) struct App {
     /// n・N で繰り返すための直前の検索。
     /// パターンと方向（trueなら前方）を持つ。
     last_search: Option<(String, bool)>,
+    /// `:&` `:&&` `g&` `~` のために覚えておく直前の
+    /// `:s`。
+    last_substitute: Option<substitute::LastSubstitute>,
+    /// `c`フラグの対話確認の途中状態。
+    confirm_state: Option<substitute::ConfirmState>,
     path: Option<PathBuf>,
     modified: bool,
     /// 画面下に出す一言。
@@ -127,6 +134,8 @@ impl App {
             search: String::new(),
             search_forward: true,
             last_search: None,
+            last_substitute: None,
+            confirm_state: None,
             path: None,
             modified: false,
             message: String::new(),
