@@ -5,6 +5,7 @@ mod search;
 mod substitute;
 mod ui;
 mod view;
+mod visual;
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +39,7 @@ enum Mode {
     Command,
     Search,
     Confirm,
+    Visual,
 }
 
 pub(crate) struct App {
@@ -76,6 +78,15 @@ pub(crate) struct App {
     /// 木の部分木をそのままソース表示に貼ると、
     /// 相対深さが混ざって表示が崩れるので分けてある。
     source_register: Vec<Node>,
+    /// Visual中の選択の種類。Visual以外では意味を持たない。
+    visual_kind: visual::VisualKind,
+    /// Visualに入ったときのカーソルのノード番号。
+    visual_anchor: usize,
+    /// Visualに入ったときのcursor_col（文字単位のとき用）。
+    visual_anchor_col: usize,
+    /// 直前のVisual選択範囲（開始ノード番号, 終了ノード番号）。
+    /// 両端含む。`'<,'>`のために抜けるたびに更新する。
+    last_visual_range: Option<(usize, usize)>,
     /// 数字を溜めた回数指定。
     count: Option<usize>,
     /// 行番号を出すか。:set number で切り替える。
@@ -144,6 +155,10 @@ impl App {
             redo: Vec::new(),
             register: Vec::new(),
             source_register: Vec::new(),
+            visual_kind: visual::VisualKind::Char,
+            visual_anchor: 0,
+            visual_anchor_col: 0,
+            last_visual_range: None,
             count: None,
             number: false,
             scroll: 0,

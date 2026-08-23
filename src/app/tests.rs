@@ -1,3 +1,4 @@
+use super::visual::VisualKind;
 use super::App;
 use super::Mode;
 use crate::node::nodes_from;
@@ -1706,11 +1707,11 @@ fn source_view_has_its_own_register() {
     assert_eq!(app.register.len(), 1);
 
     app.toggle_source_view();
-    assert!(app.source_register.is_empty());
+    assert_eq!(app.source_register.len(), 0);
 
     press(&mut app, "ggyy");
     assert_eq!(app.source_register.len(), 1);
-    assert!(app.register.len() == 1);
+    assert_eq!(app.register.len(), 1);
 
     // 貼り付けは今のモードのレジスタだけを見る。
     press(&mut app, "p");
@@ -2423,4 +2424,372 @@ fn substitute_centers_cursor() {
     assert_eq!(app.nodes[25].text, "XX");
     assert_eq!(app.cursor, 25);
     assert_eq!(app.scroll + app.height / 2, app.cursor);
+}
+
+
+/// v（文字単位）のヤンクは、対象範囲をノードのリスト
+/// として（yy/ddと同じ形で）レジスタへ積む。1ノード
+/// 内に収まる場合もそのノード1つだけのリストになる。
+/// pは常にノード単位の貼り付け（兄弟ノードとして
+/// 挿入）になる。
+#[test]
+fn visual_char_yank_and_paste() {
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0vlly");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.to_scheme(), "abcdef");
+    assert_eq!(app.register.len(), 1);
+    assert_eq!(app.register[0].text, "abc");
+    assert_eq!(app.cursor_col, 0);
+    press(&mut app, "$p");
+    assert_eq!(app.to_scheme(), "abcdef\n\nabc");
+}
+
+/// v（文字単位）の削除は選択部分だけをそのノードの
+/// テキストから取り除く（ノード自体は残る）。pは
+/// ノードとして貼り付けられる。
+#[test]
+fn visual_char_delete_and_paste() {
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0vlld");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.to_scheme(), "def");
+    assert_eq!(app.cursor_col, 0);
+    assert_eq!(app.register.len(), 1);
+    assert_eq!(app.register[0].text, "abc");
+    press(&mut app, "P");
+    assert_eq!(app.to_scheme(), "abc\n\ndef");
+}
+
+/// v（文字単位）のcはInsertへ入り、そこで打った文字が
+/// 反映される（1ノード内に収まる削除は今まで通り
+/// そのノードのテキストを直接削るだけ）。
+#[test]
+fn visual_char_change() {
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0vllc");
+    assert_eq!(app.mode, Mode::Insert);
+    assert_eq!(app.to_scheme(), "def");
+    press(&mut app, "XYZ");
+    assert_eq!(app.to_scheme(), "XYZdef");
+}
+
+/// v（文字単位）でj/kを押すとノードを跨いで選択が
+/// 伸びる。アンカーの側のノードは選択開始位置から
+/// 末尾まで、カーソル側のノードは先頭から選択終了
+/// 位置までがそれぞれレジスタに入る（合体しない）。
+#[test]
+fn visual_char_crosses_nodes_extends_selection() {
+    let mut app = nodes_app(&["abc", "def"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "v");
+    press(&mut app, "j");
+    assert_eq!(app.cursor, 1);
+    assert_eq!(app.cursor_col, 1);
+    press(&mut app, "y");
+    assert_eq!(app.register.len(), 2);
+    assert_eq!(app.register[0].text, "bc");
+    assert_eq!(app.register[1].text, "de");
+    // ヤンクなのでノードは変わらない。
+    assert_eq!(app.nodes[0].text, "abc");
+    assert_eq!(app.nodes[1].text, "def");
+}
+
+/// 複数ノードにまたがるv（文字単位）のyは、両端だけ
+/// テキストを削ったノードのリストという「2yyの欠けた
+/// 版」になる。1本の文字列に結合しない。
+#[test]
+fn visual_char_multi_node_yank_matches_partial_2yy() {
+    let mut app = nodes_app(&["hello", "world", "foo"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "v");
+    app.cursor = 1;
+    app.cursor_col = 1;
+    press(&mut app, "y");
+    assert_eq!(app.cursor, 0);
+    assert_eq!(app.cursor_col, 1);
+    assert_eq!(app.register.len(), 2);
+    assert_eq!(app.register[0].text, "ello");
+    assert_eq!(app.register[1].text, "wo");
+    assert_eq!(app.register[0].depth, 0);
+    assert_eq!(app.register[1].depth, 0);
+    // ヤンクなのでノードは変わらない。
+    assert_eq!(app.nodes[0].text, "hello");
+    assert_eq!(app.nodes[1].text, "world");
+    assert_eq!(app.nodes[2].text, "foo");
+}
+
+/// 複数ノードにまたがるdは、両端のノードを合体させず、
+/// それぞれ選択部分だけを削った別々のノードのまま残す。
+#[test]
+fn visual_char_multi_node_delete_does_not_merge() {
+    let mut app = nodes_app(&["hello", "world", "foo"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "v");
+    app.cursor = 1;
+    app.cursor_col = 1;
+    press(&mut app, "d");
+    assert_eq!(app.nodes.len(), 3);
+    assert_eq!(app.nodes[0].text, "h");
+    assert_eq!(app.nodes[1].text, "rld");
+    assert_eq!(app.nodes[2].text, "foo");
+    assert_eq!(app.cursor, 0);
+    assert_eq!(app.cursor_col, 1);
+    assert_eq!(app.register.len(), 2);
+    assert_eq!(app.register[0].text, "ello");
+    assert_eq!(app.register[1].text, "wo");
+}
+
+/// 選択が3ノード以上にまたがるとき、完全に間に挟まる
+/// ノードは無傷のままレジスタに入る（両端だけが削られる）。
+#[test]
+fn visual_char_multi_node_middle_node_untouched_in_register() {
+    let mut app = nodes_app(&["hello", "world", "foo"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "v");
+    app.cursor = 2;
+    app.cursor_col = 1;
+    press(&mut app, "d");
+    assert_eq!(app.nodes.len(), 2);
+    assert_eq!(app.nodes[0].text, "h");
+    assert_eq!(app.nodes[1].text, "o");
+    assert_eq!(app.register.len(), 3);
+    assert_eq!(app.register[0].text, "ello");
+    assert_eq!(app.register[1].text, "world");
+    assert_eq!(app.register[2].text, "fo");
+    press(&mut app, "P");
+    assert_eq!(app.nodes.len(), 5);
+    assert_eq!(app.nodes[0].text, "ello");
+    assert_eq!(app.nodes[1].text, "world");
+    assert_eq!(app.nodes[2].text, "fo");
+    assert_eq!(app.nodes[3].text, "h");
+    assert_eq!(app.nodes[4].text, "o");
+}
+
+/// 複数ノードにまたがるcも合体せず削除し、開始ノード
+/// の残った部分の直後でInsertへ入る。
+#[test]
+fn visual_char_multi_node_change() {
+    let mut app = nodes_app(&["hello", "world", "foo"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "v");
+    app.cursor = 1;
+    app.cursor_col = 1;
+    press(&mut app, "c");
+    assert_eq!(app.mode, Mode::Insert);
+    assert_eq!(app.nodes[0].text, "h");
+    assert_eq!(app.nodes[1].text, "rld");
+    press(&mut app, "X");
+    assert_eq!(app.nodes[0].text, "hX");
+}
+
+/// 選択範囲がノード全体を覆っているときは、そのノード
+/// ごと消える（ddと同じ。子は1段持ち上がる）。
+#[test]
+fn visual_char_full_nodes_delete_like_dd() {
+    let mut app = insert("f\n\ta\n\t\tx");
+    press(&mut app, "\x1b");
+    assert_eq!(app.to_scheme(), "(f (a x))");
+    app.cursor = 0;
+    app.cursor_col = 0;
+    press(&mut app, "v");
+    app.cursor = 1;
+    app.cursor_col = 0;
+    press(&mut app, "d");
+    assert_eq!(app.to_scheme(), "x");
+    assert_eq!(app.nodes.len(), 1);
+    assert_eq!(app.nodes[0].depth, 0);
+    assert_eq!(app.register.len(), 2);
+    assert_eq!(app.register[0].text, "f");
+    assert_eq!(app.register[1].text, "a");
+}
+
+/// V（行単位）で複数ノードを選んだyは、同じ範囲を
+/// Nyyしたのと同じ結果になる。
+#[test]
+fn visual_line_yank_matches_nyy() {
+    let mut app = insert("f\n\ta\n\tb\n\x08c");
+    press(&mut app, "\x1b");
+    assert_eq!(app.to_scheme(), "(f (a b) c)");
+    press(&mut app, "ggVjjy");
+    assert_eq!(app.register.len(), 3);
+    press(&mut app, "Gp");
+    assert_eq!(
+        app.to_scheme(),
+        "(f (a b) c (f (a b)))"
+    );
+}
+
+/// V（行単位）で複数ノードを選んだdは、ノードが消えて
+/// 子が持ち上がる（既存のddの複数ノード版と同じ）。
+#[test]
+fn visual_line_delete_promotes_child() {
+    let mut app = insert("f\n\ta\n\t\tx");
+    press(&mut app, "\x1b");
+    assert_eq!(app.to_scheme(), "(f (a x))");
+    press(&mut app, "ggVjd");
+    assert_eq!(app.to_scheme(), "x");
+    assert_eq!(app.nodes.len(), 1);
+    assert_eq!(app.nodes[0].depth, 0);
+}
+
+/// V（行単位）のcはノードが消えて空ノードができ、
+/// Insertモードになる。
+#[test]
+fn visual_line_change() {
+    let mut app = insert("f\n\ta\n\t\tx");
+    press(&mut app, "\x1b");
+    press(&mut app, "ggVjc");
+    assert_eq!(app.mode, Mode::Insert);
+    assert_eq!(app.nodes.len(), 2);
+    assert_eq!(app.nodes[0].text, "");
+    press(&mut app, "NEW");
+    assert_eq!(app.nodes[0].text, "NEW");
+    assert_eq!(app.nodes[1].text, "x");
+}
+
+/// V（行単位）で親子関係のある複数ノードを選んで>を
+/// 押しても、子が二重にインデントされない。
+#[test]
+fn visual_line_indent_does_not_double_apply() {
+    let mut app = insert("root\nf\n\ta\n\t\tx");
+    press(&mut app, "\x1b");
+    assert_eq!(app.to_scheme(), "root\n\n(f (a x))");
+    assert_eq!(
+        app.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+        vec![0, 0, 1, 2]
+    );
+    // f と a を選んで > 。fの部分木（f, a, x）が
+    // まとめて1段だけ下がるべきで、aだけ2段
+    // 下がってはいけない。
+    press(&mut app, "ggj"); // gg -> root, j -> f
+    press(&mut app, "Vj>");
+    assert_eq!(
+        app.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+}
+
+/// V選択中に:を押すとコマンド行に'<,'>が入り、続けて
+/// s/pat/repl/を打つと選択範囲だけに置換が適用される。
+#[test]
+fn visual_command_range() {
+    let mut app = nodes_app(&["foo", "foo", "foo"]);
+    app.cursor = 0;
+    press(&mut app, "Vj:");
+    assert_eq!(app.command, "'<,'>");
+    press(&mut app, "s/foo/X/\n");
+    assert_eq!(app.nodes[0].text, "X");
+    assert_eq!(app.nodes[1].text, "X");
+    assert_eq!(app.nodes[2].text, "foo");
+}
+
+/// Escで選択解除してもノードの内容は変わらない。
+#[test]
+fn visual_esc_discards_selection_without_change() {
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0vll\x1b");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.to_scheme(), "abcdef");
+}
+
+/// v/Vをもう一度押すと解除され、逆を押すと種別だけ
+/// 切り替わる。
+#[test]
+fn visual_toggle_kind_and_exit() {
+    let mut app = insert("abc");
+    press(&mut app, "\x1b0v");
+    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.visual_kind, VisualKind::Char);
+    press(&mut app, "v");
+    assert_eq!(app.mode, Mode::Normal);
+    press(&mut app, "V");
+    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.visual_kind, VisualKind::Line);
+    press(&mut app, "V");
+    assert_eq!(app.mode, Mode::Normal);
+    // 逆を押すと種別だけ切り替わる。
+    press(&mut app, "v");
+    assert_eq!(app.visual_kind, VisualKind::Char);
+    press(&mut app, "V");
+    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.visual_kind, VisualKind::Line);
+}
+
+/// Visual中も矢印キーでカーソル（＝選択の端）が動く。
+/// handle_keyがhandle_commonより先にVisualを横取りして
+/// いたため、矢印キーが完全に無反応になっていた。
+#[test]
+fn visual_arrow_keys_extend_selection() {
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0v");
+    assert_eq!(app.cursor_col, 0);
+    app.handle_key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(app.cursor_col, 1);
+    app.handle_key(KeyEvent::new(
+        KeyCode::Right,
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(app.cursor_col, 2);
+}
+
+/// 選択範囲は画面上で反転表示される。文字単位が
+/// 複数ノードにまたがるときも、開始ノードは選択位置
+/// から末尾まで、終了ノードは先頭から選択位置まで、
+/// 間のノードは全体が反転する。
+#[test]
+fn visual_selection_is_reversed_on_screen() {
+    fn all_reversed(
+        line: &ratatui::text::Line,
+    ) -> bool {
+        line.spans.iter().all(|span| {
+            span.style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        })
+    }
+    fn reversed_text(
+        line: &ratatui::text::Line,
+    ) -> String {
+        line.spans
+            .iter()
+            .filter(|span| {
+                span.style
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            })
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+    // V（行単位）は行全体を反転させる。
+    let mut app = insert("abc\ndef");
+    press(&mut app, "\x1b");
+    press(&mut app, "ggVj");
+    let lines = app.tree_display();
+    assert!(all_reversed(&lines[0]));
+    assert!(all_reversed(&lines[1]));
+    // v（文字単位）は選択した文字だけを反転させる。
+    let mut app = insert("abcdef");
+    press(&mut app, "\x1b0vll");
+    let line = &app.tree_display()[0];
+    assert_eq!(reversed_text(line), "abc");
+    // v（文字単位）が複数ノードにまたがる場合、開始
+    // ノードは末尾まで、終了ノードは先頭からだけ反転
+    // する。間に完全に挟まるノードは全体が反転する。
+    let mut app = nodes_app(&["hello", "world", "foo"]);
+    app.cursor = 0;
+    app.cursor_col = 1;
+    press(&mut app, "vjj");
+    let lines = app.tree_display();
+    assert_eq!(reversed_text(&lines[0]), "ello");
+    assert!(all_reversed(&lines[1]));
+    assert_eq!(reversed_text(&lines[2]), "fo");
 }

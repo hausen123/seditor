@@ -363,6 +363,17 @@ impl App {
         line: &str,
     ) -> bool {
         let line = line.trim();
+
+        if let Some(rest) = line.strip_prefix("'<,'>") {
+            let Some(range) = self.last_visual_range
+            else {
+                self.message =
+                    "直前の選択がありません".to_string();
+                return true;
+            };
+            return self.dispatch_range_command(range, rest);
+        }
+
         let prefix_len = range_prefix_len(line);
         let range_text = &line[..prefix_len];
         let rest = &line[prefix_len..];
@@ -372,6 +383,15 @@ impl App {
             return false;
         };
 
+        self.dispatch_range_command(range, rest)
+    }
+
+    /// range解決後の`&` `&&` `s/`の分岐。
+    fn dispatch_range_command(
+        &mut self,
+        range: (usize, usize),
+        rest: &str,
+    ) -> bool {
         if rest == "&" {
             self.repeat_substitute(range, false);
             return true;

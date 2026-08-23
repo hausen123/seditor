@@ -1,4 +1,6 @@
+use super::visual::VisualKind;
 use super::App;
+use super::Mode;
 use crate::node::always_break;
 use crate::node::current_column;
 use crate::node::nodes_from;
@@ -13,6 +15,22 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
+
+/// tree_display()内で、Visual選択の反転をどのノード・
+/// 範囲に適用するか。
+enum VisualHighlight {
+    Line((usize, usize)),
+    /// 文字単位。lo_node/hi_nodeが同じなら1ノード内、
+    /// 違えばlo_nodeは選択開始位置から末尾まで、
+    /// hi_nodeは先頭から選択終了位置まで、間のノードは
+    /// 全体を反転させる。
+    Char {
+        lo_node: usize,
+        lo_col: usize,
+        hi_node: usize,
+        hi_col_end: usize,
+    },
+}
 
 impl App {
     /// F2。木とソース表示を切り替える。
@@ -186,6 +204,29 @@ impl App {
             self.width
         };
 
+        // Visual中は選択範囲全体も反転させる。行番号は
+        // ノード番号（Line）か、対象ノードと文字範囲
+        // （Char）で持つ。
+        let visual = (self.mode == Mode::Visual).then(
+            || match self.visual_kind {
+                VisualKind::Line => {
+                    VisualHighlight::Line(
+                        self.visual_line_range(),
+                    )
+                }
+                VisualKind::Char => {
+                    let (lo_node, lo_col, hi_node, hi_col_end) =
+                        self.visual_char_span();
+                    VisualHighlight::Char {
+                        lo_node,
+                        lo_col,
+                        hi_node,
+                        hi_col_end,
+                    }
+                }
+            },
+        );
+
         self.tree_lines()
             .into_iter()
             .enumerate()
@@ -209,6 +250,50 @@ impl App {
                 // 1つ足した位置になる。
                 let cursor_at = (index == self.cursor)
                     .then(|| self.cursor_column(index));
+
+                // Visual選択の反転範囲（この行での文字
+                // インデックス、半開区間）。
+                let visual_range = match &visual {
+                    Some(VisualHighlight::Line((
+                        lo,
+                        hi,
+                    ))) if index >= *lo && index <= *hi => {
+                        Some((0, chars.len()))
+                    }
+                    Some(VisualHighlight::Char {
+                        lo_node,
+                        lo_col,
+                        hi_node,
+                        hi_col_end,
+                    }) if index >= *lo_node
+                        && index <= *hi_node =>
+                    {
+                        let (lo, hi_end) =
+                            if lo_node == hi_node {
+                                (*lo_col, *hi_col_end)
+                            } else if index == *lo_node {
+                                (
+                                    *lo_col,
+                                    self.nodes[index]
+                                        .text
+                                        .len(),
+                                )
+                            } else if index == *hi_node {
+                                (0, *hi_col_end)
+                            } else {
+                                (
+                                    0,
+                                    self.nodes[index]
+                                        .text
+                                        .len(),
+                                )
+                            };
+                        Some(self.visual_char_columns(
+                            index, lo, hi_end,
+                        ))
+                    }
+                    _ => None,
+                };
 
                 let total = match cursor_at {
                     Some(at) if at >= chars.len() => {
@@ -244,8 +329,14 @@ impl App {
                         .copied()
                         .unwrap_or(' ');
 
+                    let selected = matches!(
+                        visual_range,
+                        Some((lo, hi)) if i >= lo && i < hi
+                    );
+
                     let style =
-                        if cursor_at == Some(i) {
+                        if cursor_at == Some(i) || selected
+                        {
                             highlight
                         } else {
                             Style::default()
@@ -264,6 +355,35 @@ impl App {
                 Line::from(spans)
             })
             .collect()
+    }
+
+    /// 文字単位のVisual選択（バイト位置[lo, hi_end)）を、
+    /// tree_display()の行内の文字インデックス（半開区間）
+    /// に変換する。cursor_column()と同じ換算を使う。
+    ///
+    /// テキストが空（◦の上）のときは、◦の1文字を
+    /// 選択とみなす。
+    fn visual_char_columns(
+        &self,
+        index: usize,
+        lo: usize,
+        hi_end: usize,
+    ) -> (usize, usize) {
+        let prefix =
+            self.tree_prefix(index).chars().count();
+
+        let text = &self.nodes[index].text;
+
+        if text.is_empty() {
+            return (prefix, prefix + 1);
+        }
+
+        let start =
+            prefix + text[..lo].chars().count();
+        let end =
+            prefix + text[..hi_end].chars().count();
+
+        (start, end)
     }
 
     pub(super) fn tree_prefix(&self, index: usize) -> String {

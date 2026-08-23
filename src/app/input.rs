@@ -1,5 +1,6 @@
 use super::App;
 use super::Mode;
+use super::visual::VisualKind;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -80,6 +81,10 @@ impl App {
             Mode::Command => {}
             Mode::Search => {}
             Mode::Confirm => {}
+            // Visualは矢印やF2もhandle_commonで動く
+            // （hjklと同じくカーソルを動かし、選択が
+            // それに追従する）。
+            Mode::Visual => self.handle_visual(key),
         }
 
         !self.quit
@@ -395,6 +400,8 @@ impl App {
             // パターンにして前方・後方検索する。
             '*' => self.search_word(true),
             '#' => self.search_word(false),
+            'v' => self.enter_visual(VisualKind::Char),
+            'V' => self.enter_visual(VisualKind::Line),
             _ => {}
         }
     }
@@ -426,6 +433,7 @@ impl App {
                 self.paste_text(text);
             }
             Mode::Confirm => {}
+            Mode::Visual => {}
         }
     }
 

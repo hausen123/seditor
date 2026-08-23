@@ -1,5 +1,6 @@
 use super::App;
 use super::Mode;
+use super::visual::VisualKind;
 use crate::node::number_width;
 
 use ratatui::layout::Constraint;
@@ -108,6 +109,10 @@ pub(super) fn title(app: &App) -> String {
         Mode::Command => "COMMAND",
         Mode::Search => "SEARCH",
         Mode::Confirm => "CONFIRM",
+        Mode::Visual => match app.visual_kind {
+            VisualKind::Line => "VISUAL LINE",
+            VisualKind::Char => "VISUAL",
+        },
     };
 
     format!(" {}{} - {} ", name, mark, mode)

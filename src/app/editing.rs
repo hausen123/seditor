@@ -324,7 +324,7 @@ impl App {
     /// 1ノードの削除に当てると「子を1段持ち上げる」に
     /// なり、複数まとめて消したときの穴も同じ規則で
     /// 塞がる。
-    fn repair(&mut self) {
+    pub(super) fn repair(&mut self) {
         for i in 0..self.nodes.len() {
             let limit = if i == 0 {
                 0
@@ -380,7 +380,7 @@ impl App {
     /// indexの部分木の直後の位置。
     ///
     /// 深さがindexと同じか浅くなる手前まで。
-    fn subtree_end(&self, index: usize) -> usize {
+    pub(super) fn subtree_end(&self, index: usize) -> usize {
         let depth = self.nodes[index].depth;
         let mut i = index + 1;
 
@@ -434,6 +434,15 @@ impl App {
             self.register.clone()
         };
 
+        self.paste_nodes(register, before, count)
+    }
+
+    fn paste_nodes(
+        &mut self,
+        register: Vec<Node>,
+        before: bool,
+        count: usize,
+    ) {
         if register.is_empty() {
             self.message =
                 "何もヤンクしていません".to_string();
