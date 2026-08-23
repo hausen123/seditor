@@ -96,7 +96,7 @@ pub(crate) fn draw(
 pub(super) fn title(app: &App) -> String {
     let name = match &app.path {
         Some(path) => path.display().to_string(),
-        None => "[無名]".to_string(),
+        None => "[No Name]".to_string(),
     };
 
     let mark = if app.modified { " [+]" } else { "" };

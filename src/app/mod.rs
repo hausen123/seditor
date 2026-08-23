@@ -449,7 +449,7 @@ impl App {
     fn undo(&mut self) {
         let Some(snapshot) = self.undo.pop() else {
             self.message =
-                "これ以上戻れません".to_string();
+                "already at oldest change".to_string();
             return;
         };
 
@@ -460,7 +460,7 @@ impl App {
     fn redo(&mut self) {
         let Some(snapshot) = self.redo.pop() else {
             self.message =
-                "これ以上やり直せません".to_string();
+                "already at newest change".to_string();
             return;
         };
 

@@ -81,7 +81,7 @@ impl App {
                 Some((last, _)) => last.clone(),
                 None => {
                     self.message =
-                        "検索パターンがありません"
+                        "no search pattern"
                             .to_string();
                     return;
                 }
@@ -105,7 +105,7 @@ impl App {
             self.last_search.clone()
         else {
             self.message =
-                "検索パターンがありません".to_string();
+                "no search pattern".to_string();
             return;
         };
 
@@ -125,7 +125,7 @@ impl App {
 
         if text.is_empty() {
             self.message =
-                "空のノードは検索できません".to_string();
+                "cannot search an empty node".to_string();
             return;
         }
 
@@ -155,7 +155,7 @@ impl App {
             Ok(regex) => regex,
             Err(error) => {
                 self.message = format!(
-                    "検索パターンが不正です: {}",
+                    "invalid search pattern: {}",
                     error
                 );
                 return;
@@ -177,7 +177,7 @@ impl App {
 
         let Some(index) = found else {
             self.message = format!(
-                "パターンが見つかりません: {}",
+                "pattern not found: {}",
                 pattern
             );
             return;
@@ -195,10 +195,10 @@ impl App {
         self.center_on_cursor();
 
         self.message = if wrapped && forward {
-            "検索は末尾から先頭へ折り返しました"
+            "search wrapped from bottom to top"
                 .to_string()
         } else if wrapped {
-            "検索は先頭から末尾へ折り返しました"
+            "search wrapped from top to bottom"
                 .to_string()
         } else {
             String::new()

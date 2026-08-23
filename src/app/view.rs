@@ -136,7 +136,7 @@ impl App {
             Ok(reading) => reading,
             Err(error) => {
                 self.message = format!(
-                    "木に戻せません: {}",
+                    "cannot parse back into a tree: {}",
                     error
                 );
                 return;

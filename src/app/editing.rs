@@ -418,7 +418,7 @@ impl App {
         }
 
         self.message =
-            format!("{}ノードをヤンクしました", length);
+            format!("yanked {} node(s)", length);
     }
 
     /// レジスタの内容を貼る。木とソース表示で
@@ -445,7 +445,7 @@ impl App {
     ) {
         if register.is_empty() {
             self.message =
-                "何もヤンクしていません".to_string();
+                "nothing yanked".to_string();
             return;
         }
 

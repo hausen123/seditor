@@ -368,7 +368,7 @@ impl App {
             let Some(range) = self.last_visual_range
             else {
                 self.message =
-                    "直前の選択がありません".to_string();
+                    "no previous selection".to_string();
                 return true;
             };
             return self.dispatch_range_command(range, rest);
@@ -414,14 +414,14 @@ impl App {
         let Some(last) = self.last_substitute.clone()
         else {
             self.message =
-                "直前の置換がありません".to_string();
+                "no previous substitution".to_string();
             return;
         };
         let Some((pattern, _)) =
             self.last_search.clone()
         else {
             self.message =
-                "直前の置換がありません".to_string();
+                "no previous substitution".to_string();
             return;
         };
 
@@ -443,7 +443,7 @@ impl App {
         let Some(last) = self.last_substitute.clone()
         else {
             self.message =
-                "直前の置換がありません".to_string();
+                "no previous substitution".to_string();
             return;
         };
 
@@ -474,7 +474,7 @@ impl App {
                 Some((last, _)) => last.clone(),
                 None => {
                     self.message =
-                        "検索パターンがありません"
+                        "no search pattern"
                             .to_string();
                     return;
                 }
@@ -537,7 +537,7 @@ impl App {
             Ok(regex) => regex,
             Err(error) => {
                 self.message = format!(
-                    "検索パターンが不正です: {}",
+                    "invalid search pattern: {}",
                     error
                 );
                 return;
@@ -594,7 +594,7 @@ impl App {
         if count == 0 {
             if !quiet_empty {
                 self.message = format!(
-                    "パターンが見つかりません: {}",
+                    "pattern not found: {}",
                     regex.as_str()
                 );
             } else {
@@ -602,7 +602,7 @@ impl App {
             }
         } else {
             self.message =
-                format!("{}箇所マッチしました", count);
+                format!("{} match(es)", count);
         }
     }
 
@@ -636,7 +636,7 @@ impl App {
         if total == 0 {
             if !quiet_empty {
                 self.message = format!(
-                    "パターンが見つかりません: {}",
+                    "pattern not found: {}",
                     regex.as_str()
                 );
             } else {
@@ -651,7 +651,7 @@ impl App {
             self.center_on_cursor();
         }
         self.message =
-            format!("{}箇所を置換しました", total);
+            format!("{} substitution(s) made", total);
     }
 
     fn start_confirm(
@@ -734,7 +734,7 @@ impl App {
                 self.cursor_col = start;
                 self.center_on_cursor();
                 self.message =
-                    "置換しますか？ (y/n/a/q/l)"
+                    "replace? (y/n/a/q/l)"
                         .to_string();
                 self.mode = Mode::Confirm;
                 true
@@ -856,7 +856,7 @@ impl App {
         if !state.entered && state.count == 0 {
             if !state.quiet_empty {
                 self.message = format!(
-                    "パターンが見つかりません: {}",
+                    "pattern not found: {}",
                     state.regex.as_str()
                 );
             } else {
@@ -864,7 +864,7 @@ impl App {
             }
         } else {
             self.message = format!(
-                "{}箇所を置換しました",
+                "{} substitution(s) made",
                 state.count
             );
         }

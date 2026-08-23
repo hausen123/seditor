@@ -356,7 +356,7 @@ fn commands() {
     assert!(app.modified);
     // ファイル名が無ければ書けない。
     press(&mut app, ":w\n");
-    assert_eq!(app.message, "ファイル名がありません");
+    assert_eq!(app.message, "no file name");
     assert!(app.modified);
     // 名前を渡せば書けて、以降は覚えている。
     press(&mut app, &format!(":w {}\n", name));
@@ -388,7 +388,7 @@ fn commands() {
     press(&mut app, ":zzz\n");
     assert_eq!(
         app.message,
-        "不明なコマンドです: zzz"
+        "unknown command: zzz"
     );
     // :wq は書いてから終わる。
     let mut app = insert("x");
@@ -506,7 +506,7 @@ fn edit_command() {
     // 壊れたファイルは読まない。
     fs::write(&path, "(a").unwrap();
     press(&mut app, ":e!\n");
-    assert!(app.message.contains("括弧が閉じていません"));
+    assert!(app.message.contains("unclosed parenthesis"));
     let _ = fs::remove_file(&path);
 }
 
@@ -562,12 +562,12 @@ fn undo_redo() {
     // 端では断る。
     let mut app = App::new();
     press(&mut app, "u");
-    assert_eq!(app.message, "これ以上戻れません");
+    assert_eq!(app.message, "already at oldest change");
     app.handle_key(KeyEvent::new(
         KeyCode::Char('r'),
         KeyModifiers::CONTROL,
     ));
-    assert_eq!(app.message, "これ以上やり直せません");
+    assert_eq!(app.message, "already at newest change");
 }
 
 /// :e は履歴を捨てる。
@@ -640,7 +640,7 @@ fn yank_paste() {
     let mut app = insert("f\n\ta\nb");
     assert_eq!(app.to_scheme(), "(f a b)");
     press(&mut app, "\x1bkyy");
-    assert_eq!(app.message, "1ノードをヤンクしました");
+    assert_eq!(app.message, "yanked 1 node(s)");
     press(&mut app, "p");
     assert_eq!(app.to_scheme(), "(f a a b)");
     assert_eq!(app.cursor, 2);
@@ -663,7 +663,7 @@ fn yank_paste() {
     // 何もヤンクしていなければ断る。
     let mut app = insert("a");
     press(&mut app, "\x1bp");
-    assert_eq!(app.message, "何もヤンクしていません");
+    assert_eq!(app.message, "nothing yanked");
 }
 
 /// 中身も子も無い ◦ は貼り付けで置き換わる。
@@ -969,10 +969,10 @@ fn line_numbers() {
     press(&mut app, ":set zzz\n");
     assert_eq!(
         app.message,
-        "不明な設定項目です: zzz"
+        "unknown setting: zzz"
     );
     press(&mut app, ":set\n");
-    assert_eq!(app.message, "設定項目がありません");
+    assert_eq!(app.message, "no setting specified");
     // ソース表示は出力の行番号。
     app.toggle_source_view();
     assert_eq!(
@@ -1059,12 +1059,12 @@ fn search() {
     // 末尾から前方検索すると先頭へ折り返す。
     press(&mut app, "/apple\n");
     assert_eq!(app.cursor, 0);
-    assert!(app.message.contains("折り返"));
+    assert!(app.message.contains("wrapped"));
 
     // n は同じ方向・同じパターンで繰り返す。
     press(&mut app, "n");
     assert_eq!(app.cursor, 3);
-    assert!(!app.message.contains("折り返"));
+    assert!(!app.message.contains("wrapped"));
 
     // N は逆方向だが、n・N を繰り返しても検索の
     // 基準方向（前方）自体は変わらない。
@@ -1104,13 +1104,13 @@ fn search() {
     app.cursor = 2;
     press(&mut app, "/nonexistentxyz\n");
     assert_eq!(app.cursor, 2);
-    assert!(app.message.contains("見つかりません"));
+    assert!(app.message.contains("not found"));
 
     // 不正な正規表現もメッセージを出す。
     app.cursor = 2;
     press(&mut app, "/[\n");
     assert_eq!(app.cursor, 2);
-    assert!(app.message.contains("不正"));
+    assert!(app.message.contains("invalid"));
 
     // Escで検索を取り消す。
     press(&mut app, "/apple");
@@ -1193,7 +1193,7 @@ fn subtree_yank_cut() {
     press(&mut app, ":2\nY");
     assert_eq!(
         app.message,
-        "5ノードをヤンクしました"
+        "yanked 5 node(s)"
     );
     // 次の節の頭に移り、手前に入れる。
     press(&mut app, ":7\nP");
@@ -1219,7 +1219,7 @@ fn subtree_yank_cut() {
     press(&mut app, "j3Y");
     assert_eq!(
         app.message,
-        "1ノードをヤンクしました"
+        "yanked 1 node(s)"
     );
     // 葉の上では1ノードだけ。dd と同じ結果になる。
     press(&mut app, "D");
@@ -1669,7 +1669,7 @@ fn source_view_parse_error_stays() {
     press(&mut app, "A (\x1b");
     app.toggle_source_view();
     assert!(app.source_mode);
-    assert!(app.message.contains("木に戻せません"));
+    assert!(app.message.contains("cannot parse back"));
 }
 
 /// ソース表示の空行は◦にならない。
@@ -2099,7 +2099,7 @@ fn substitute_case_flags() {
     app.cursor = 0;
     press(&mut app, ":s/foo/X/I\n");
     assert_eq!(app.nodes[0].text, "Foo");
-    assert!(app.message.contains("見つかりません"));
+    assert!(app.message.contains("not found"));
 
     // 大文字を含むパターンは既定で区別するので
     // "foo"にはヒットしない。iを付けると無視する。
@@ -2125,12 +2125,12 @@ fn substitute_e_flag() {
     let mut app = nodes_app(&["abc"]);
     app.cursor = 0;
     press(&mut app, ":s/xyz/Q/\n");
-    assert!(app.message.contains("見つかりません"));
+    assert!(app.message.contains("not found"));
 
     let mut app = nodes_app(&["abc"]);
     app.cursor = 0;
     press(&mut app, ":s/xyz/Q/e\n");
-    assert!(!app.message.contains("見つかりません"));
+    assert!(!app.message.contains("not found"));
     assert_eq!(app.nodes[0].text, "abc");
 }
 
@@ -2317,7 +2317,7 @@ fn substitute_confirm_yes_and_undo() {
     app.cursor = 0;
     press(&mut app, ":%s/foo/X/c\n");
     assert_eq!(app.mode, Mode::Confirm);
-    assert!(app.message.contains("置換しますか"));
+    assert!(app.message.contains("replace?"));
 
     press(&mut app, "y");
     assert_eq!(app.mode, Mode::Confirm);
@@ -2401,7 +2401,7 @@ fn substitute_confirm_no_match() {
     app.cursor = 0;
     press(&mut app, ":s/xyz/Q/c\n");
     assert_eq!(app.mode, Mode::Normal);
-    assert!(app.message.contains("見つかりません"));
+    assert!(app.message.contains("not found"));
 }
 
 /// 置換後、カーソルは最後にマッチしたノードへ移動し

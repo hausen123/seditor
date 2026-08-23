@@ -38,7 +38,7 @@ impl App {
             let options: Vec<&str> = words.collect();
             if options.is_empty() {
                 self.message =
-                    "設定項目がありません".to_string();
+                    "no setting specified".to_string();
                 return;
             }
             for option in options {
@@ -61,8 +61,8 @@ impl App {
             "q" => {
                 if self.modified {
                     self.message =
-                        "変更が保存されていません。\
-                         捨てるなら :q! です"
+                        "unsaved changes. \
+                         Use :q! to discard"
                             .to_string();
                 } else {
                     self.quit = true;
@@ -78,7 +78,7 @@ impl App {
             }
             _ => {
                 self.message =
-                    format!("不明なコマンドです: {}", name)
+                    format!("unknown command: {}", name)
             }
         }
     }
@@ -93,7 +93,7 @@ impl App {
             }
             _ => {
                 self.message = format!(
-                    "不明な設定項目です: {}",
+                    "unknown setting: {}",
                     option
                 )
             }
@@ -104,8 +104,8 @@ impl App {
     fn edit(&mut self, argument: Option<&str>) -> bool {
         if self.modified {
             self.message =
-                "変更が保存されていません。\
-                 捨てるなら :e! です"
+                "unsaved changes. \
+                 Use :e! to discard"
                     .to_string();
             return false;
         }
@@ -116,7 +116,7 @@ impl App {
 
         let Some(path) = self.path.clone() else {
             self.message =
-                "ファイル名がありません".to_string();
+                "no file name".to_string();
             return false;
         };
 
@@ -128,7 +128,7 @@ impl App {
             Ok(text) => text,
             Err(error) => {
                 self.message =
-                    format!("読めません: {}", error);
+                    format!("cannot read: {}", error);
                 return false;
             }
         };
@@ -137,7 +137,7 @@ impl App {
             Ok(reading) => reading,
             Err(error) => {
                 self.message = format!(
-                    "{} を読めません: {}",
+                    "cannot read {}: {}",
                     path.display(),
                     error
                 );
@@ -159,14 +159,14 @@ impl App {
 
         self.message = if reading.hoisted > 0 {
             format!(
-                "{} を読みました。\
-                 式の中にあったコメント{}件を\
-                 行頭に出しました",
+                "read {}. Moved {} comment(s) found \
+                 inside expressions to the start \
+                 of the line",
                 path.display(),
                 reading.hoisted
             )
         } else {
-            format!("{} を読みました", path.display())
+            format!("read {}", path.display())
         };
 
         true
@@ -180,7 +180,7 @@ impl App {
 
         let Some(path) = self.path.clone() else {
             self.message =
-                "ファイル名がありません".to_string();
+                "no file name".to_string();
             return false;
         };
 
@@ -201,14 +201,14 @@ impl App {
             Ok(()) => {
                 self.modified = false;
                 self.message = format!(
-                    "{} に書き込みました",
+                    "wrote {}",
                     path.display()
                 );
                 true
             }
             Err(error) => {
                 self.message =
-                    format!("書き込めません: {}", error);
+                    format!("cannot write: {}", error);
                 false
             }
         }

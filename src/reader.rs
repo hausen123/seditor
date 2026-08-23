@@ -101,7 +101,8 @@ impl Reader {
                 None => break,
                 Some(')') => {
                     return Err(
-                        "閉じ括弧が多すぎます".to_string()
+                        "too many closing parentheses"
+                            .to_string()
                     );
                 }
                 _ => {
@@ -129,7 +130,7 @@ impl Reader {
         self.skip_space();
 
         let Some(c) = self.peek() else {
-            return Err("データがありません".to_string());
+            return Err("no data".to_string());
         };
 
         match c {
@@ -180,7 +181,7 @@ impl Reader {
             match self.peek() {
                 None => {
                     return Err(
-                        "括弧が閉じていません".to_string()
+                        "unclosed parenthesis".to_string()
                     );
                 }
                 Some(')') => {
@@ -245,7 +246,7 @@ impl Reader {
             match self.peek() {
                 None => {
                     return Err(
-                        "文字列が閉じていません".to_string()
+                        "unterminated string".to_string()
                     );
                 }
                 Some('\\') => self.position += 2,
@@ -268,7 +269,7 @@ impl Reader {
             match self.peek() {
                 None => {
                     return Err(
-                        "|が閉じていません".to_string()
+                        "unterminated |...|".to_string()
                     );
                 }
                 Some('|') => {
@@ -383,7 +384,7 @@ impl Reader {
             match (self.peek(), self.peek_at(1)) {
                 (None, _) => {
                     return Err(
-                        "ブロックコメントが閉じていません"
+                        "unterminated block comment"
                             .to_string(),
                     );
                 }
