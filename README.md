@@ -43,8 +43,8 @@ cond                (cond ((< x 2) 1)
 'x           '(a b)         '(1 2 3)       '()
 'x           '              '              '
 (1 node)     ├── a          ├── 1          └── ◦
-              └── b          ├── 2
-                              └── 3
+             └── b          ├── 2
+                            └── 3
 ```
 
 A nested list with no marker still uses `◦`, as before.
