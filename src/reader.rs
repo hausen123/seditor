@@ -44,13 +44,16 @@ pub fn read(text: &str) -> Result<Reading, String> {
 
 /// シンボルの終わりになる文字。
 ///
-/// [ ] は区切りに含めない。Gaucheの #[a-z] や
-/// #/regexp/ を1つのアトムとして読むため。
+/// `[` `]` は `(` `)` と同じ区切り文字として扱う
+/// （R6RS以降、多くのSchemeで丸括弧の代わりに使える）。
+/// Gaucheの `#[a-z]` はread_hashが`#[`を専用に読むので
+/// ここでは影響しない。
 fn is_delimiter(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
-            '(' | ')' | '"' | ';' | '\'' | '`' | ',' | '|'
+            '(' | ')' | '[' | ']' | '"' | ';' | '\'' | '`'
+                | ',' | '|'
         )
 }
 
@@ -99,7 +102,7 @@ impl Reader {
 
             match self.peek() {
                 None => break,
-                Some(')') => {
+                Some(')') | Some(']') => {
                     return Err(
                         "too many closing parentheses"
                             .to_string()
@@ -134,7 +137,7 @@ impl Reader {
         };
 
         match c {
-            '(' => {
+            '(' | '[' => {
                 self.position += 1;
                 Ok(Some(self.read_list()?))
             }
@@ -184,7 +187,7 @@ impl Reader {
                         "unclosed parenthesis".to_string()
                     );
                 }
-                Some(')') => {
+                Some(')') | Some(']') => {
                     self.position += 1;
                     self.depth -= 1;
                     return Ok(Datum::List(items));
@@ -272,6 +275,9 @@ impl Reader {
                         "unterminated |...|".to_string()
                     );
                 }
+                // \| や \\ のようなエスケープは、
+                // 中身の | として閉じ扱いしない。
+                Some('\\') => self.position += 2,
                 Some('|') => {
                     self.position += 1;
                     break;
@@ -324,6 +330,12 @@ impl Reader {
                     Box::new(list),
                 )))
             }
+            // Gaucheの文字集合リテラル。[ ] は他では
+            // 区切り文字だが、#[ の直後だけは対応する ]
+            // まで丸ごと1つのアトムとして読む。
+            Some('[') => {
+                Ok(Some(Datum::Atom(self.read_char_set()?)))
+            }
             _ => {
                 // #0= はラベル。#0# や #t はアトム。
                 let mut offset = 1;
@@ -348,7 +360,7 @@ impl Reader {
         }
     }
 
-    /// #\a や #\space。
+    /// #\a や #\space、#\x41; のような16進コード。
     ///
     /// #\( や #\; のように区切り文字そのものが
     /// 来ることがあるので、1文字目は無条件に取る。
@@ -357,6 +369,7 @@ impl Reader {
         self.position += 2;
 
         if let Some(c) = self.peek() {
+            let name_start = self.position;
             self.position += 1;
 
             if c.is_alphanumeric() {
@@ -367,9 +380,57 @@ impl Reader {
                     self.position += 1;
                 }
             }
+
+            // #\x41; のような16進コードは、';'まで
+            // 名前の一部として取り込む。#\aのような
+            // 通常の文字名の後ろに来る';'は、それとは
+            // 無関係な行コメントの開始なので触らない。
+            let name: String =
+                self.chars[name_start..self.position]
+                    .iter()
+                    .collect();
+            let is_hex_escape = matches!(
+                c,
+                'x' | 'X'
+            ) && name.len() > 1
+                && name[1..].chars().all(|c| {
+                    c.is_ascii_hexdigit()
+                });
+            if is_hex_escape
+                && self.peek() == Some(';')
+            {
+                self.position += 1;
+            }
         }
 
         self.slice(start)
+    }
+
+    /// #[a-z] のようなGaucheの文字集合リテラル。
+    ///
+    /// 中身は解釈せず、対応する ] までを丸ごと1つの
+    /// アトムとして読む。`\]` はエスケープとして扱う。
+    fn read_char_set(&mut self) -> Result<String, String> {
+        let start = self.position;
+        self.position += 2;
+
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(
+                        "unterminated #[...]".to_string()
+                    );
+                }
+                Some('\\') => self.position += 2,
+                Some(']') => {
+                    self.position += 1;
+                    break;
+                }
+                _ => self.position += 1,
+            }
+        }
+
+        Ok(self.slice(start))
     }
 
     /// #| |# は入れ子にできる。
@@ -437,6 +498,19 @@ mod tests {
         assert_eq!(data(r"#\;"), vec![atom(r"#\;")]);
         assert_eq!(data(r"#\ "), vec![atom(r"#\ ")]);
         assert_eq!(data(r"#\space"), vec![atom(r"#\space")]);
+        // 16進コード。';'まで取り込む。
+        assert_eq!(
+            data(r"#\x41;"),
+            vec![atom(r"#\x41;")]
+        );
+        // 通常の文字名の後ろの';'は無関係な行コメント。
+        assert_eq!(
+            data(r"#\a;comment"),
+            vec![
+                atom(r"#\a"),
+                Datum::Comment(";comment".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -459,6 +533,15 @@ mod tests {
             data("|foo bar|"),
             vec![atom("|foo bar|")]
         );
+        // エスケープした | や \ では閉じない。
+        assert_eq!(
+            data(r"|foo\|bar| x"),
+            vec![atom(r"|foo\|bar|"), atom("x")]
+        );
+        assert_eq!(
+            data(r"|foo\\|"),
+            vec![atom(r"|foo\\|")]
+        );
     }
 
     #[test]
@@ -475,6 +558,34 @@ mod tests {
                 atom("."),
                 atom("b")
             ])]
+        );
+        // [ ] は ( ) と同じ区切り文字として扱う
+        // （R6RS以降のletバインディング等の角括弧記法）。
+        assert_eq!(
+            data("[a b]"),
+            vec![Datum::List(vec![atom("a"), atom("b")])]
+        );
+        assert_eq!(
+            data("(let ([x 1] [y 2]) x)"),
+            vec![Datum::List(vec![
+                atom("let"),
+                Datum::List(vec![
+                    Datum::List(vec![
+                        atom("x"),
+                        atom("1")
+                    ]),
+                    Datum::List(vec![
+                        atom("y"),
+                        atom("2")
+                    ]),
+                ]),
+                atom("x"),
+            ])]
+        );
+        // 開きと閉じの種類は一致していなくてもよい。
+        assert_eq!(
+            data("(a]"),
+            vec![Datum::List(vec![atom("a")])]
         );
     }
 
@@ -568,7 +679,10 @@ mod tests {
     fn errors() {
         assert!(read("(a").is_err());
         assert!(read("a)").is_err());
+        assert!(read("[a").is_err());
+        assert!(read("a]").is_err());
         assert!(read("\"a").is_err());
         assert!(read("#| a").is_err());
+        assert!(read("#[a-z").is_err());
     }
 }
