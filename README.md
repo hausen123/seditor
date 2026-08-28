@@ -4,8 +4,8 @@ S-expression editor for scheme.
 A TUI editor that lets you edit S-expressions as a tree instead of parentheses.
 
 ```
-cargo build --release
-target/release/sedit test/test.scm
+cargo install --path your/installation/path
+sedit test/test.scm
 ```
 
 ## How the tree is written
