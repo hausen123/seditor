@@ -268,9 +268,7 @@ impl App {
 
         self.cursor -= 1;
 
-        self.cursor_col = self.cursor_col.min(
-            self.nodes[self.cursor].text.len()
-        );
+        self.clamp_cursor_col();
     }
 
     pub(super) fn move_down(&mut self) {
@@ -280,9 +278,7 @@ impl App {
 
         self.cursor += 1;
 
-        self.cursor_col = self.cursor_col.min(
-            self.nodes[self.cursor].text.len()
-        );
+        self.clamp_cursor_col();
     }
 
     pub(super) fn move_left(&mut self) {
@@ -372,8 +368,7 @@ impl App {
 
         self.repair();
 
-        self.cursor_col =
-            self.cursor_col.min(self.text().len());
+        self.clamp_cursor_col();
         self.record();
     }
 

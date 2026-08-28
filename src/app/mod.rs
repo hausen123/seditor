@@ -384,8 +384,7 @@ impl App {
         self.cursor =
             self.cursor.clamp(min_node, max_node);
 
-        self.cursor_col =
-            self.cursor_col.min(self.text().len());
+        self.clamp_cursor_col();
     }
 
     /// カーソルまたは画面をlines行動かす。
@@ -395,8 +394,7 @@ impl App {
             .cursor
             .saturating_add_signed(lines)
             .min(last);
-        self.cursor_col =
-            self.cursor_col.min(self.text().len());
+        self.clamp_cursor_col();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -473,9 +471,25 @@ impl App {
         &self.nodes[self.cursor].text
     }
 
+    /// cursor_colを現在のノードのテキストに合わせて
+    /// クランプする。
+    ///
+    /// text().len()に対して素朴にminを取るだけだと、
+    /// 移動元のノードでは境界だった位置が移動先の
+    /// マルチバイト文字の途中に来ることがある
+    /// （例: "審査基準"の7バイト目は'基'の途中）。
+    /// is_char_boundary()で境界まで戻す。
+    pub(super) fn clamp_cursor_col(&mut self) {
+        let text = self.text();
+        let mut col = self.cursor_col.min(text.len());
+        while !text.is_char_boundary(col) {
+            col -= 1;
+        }
+        self.cursor_col = col;
+    }
+
     fn move_to(&mut self, index: usize) {
         self.cursor = index.min(self.nodes.len() - 1);
-        self.cursor_col =
-            self.cursor_col.min(self.text().len());
+        self.clamp_cursor_col();
     }
 }

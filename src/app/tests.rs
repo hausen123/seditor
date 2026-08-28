@@ -343,6 +343,45 @@ fn multibyte() {
     assert_eq!(app.to_scheme(), "\"日\"");
 }
 
+/// jで短いノードから長いマルチバイトのノードへ移動
+/// すると、cursor_colが移動元の桁のまま（文字境界の
+/// 途中）になり、そこへ挿入しようとして
+/// String::insertがパニックしていた。
+///
+/// "1234567"の末尾（バイト位置7）から"審査基準"へ
+/// 移動すると、7バイト目は'基'の途中になる。
+#[test]
+fn move_between_nodes_lands_on_char_boundary() {
+    let mut app = nodes_app(&["1234567", "審査基準"]);
+    app.cursor = 0;
+    press(&mut app, "$j");
+    assert_eq!(app.cursor, 1);
+    assert!(app.nodes[1]
+        .text
+        .is_char_boundary(app.cursor_col));
+    press(&mut app, "iX");
+    assert!(app.nodes[1].text.contains('X'));
+}
+
+/// 上と同じ不具合を、矢印キー（editing.rsのmove_down/
+/// move_upが処理する別経路）でも確認する。
+#[test]
+fn arrow_move_between_nodes_lands_on_char_boundary() {
+    let mut app = nodes_app(&["1234567", "審査基準"]);
+    app.cursor = 0;
+    press(&mut app, "$");
+    app.handle_key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(app.cursor, 1);
+    assert!(app.nodes[1]
+        .text
+        .is_char_boundary(app.cursor_col));
+    press(&mut app, "iX");
+    assert!(app.nodes[1].text.contains('X'));
+}
+
 /// :コマンド。
 #[test]
 fn commands() {
