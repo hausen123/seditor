@@ -94,6 +94,7 @@ In Insert mode, `Tab` / `Shift-Tab` change the depth of just the current line, i
 |---|---|
 | `:w` | Save |
 | `:w {file}` | Save under the given name, and use that name from now on |
+| `:wt {file}` | Export the tree view's look (with the box-drawing lines) as plain text, always as a tree regardless of the current view. Remembers the name like `:w` |
 | `:e` | Reload |
 | `:e {file}` | Open |
 | `:q` | Quit |

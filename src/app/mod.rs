@@ -65,6 +65,9 @@ pub(crate) struct App {
     /// `c`フラグの対話確認の途中状態。
     confirm_state: Option<substitute::ConfirmState>,
     path: Option<PathBuf>,
+    /// `:wt`で最後に指定した書き出し先。`.scm`用の
+    /// pathとは別に持つ。
+    tree_path: Option<PathBuf>,
     modified: bool,
     /// 画面下に出す一言。
     message: String,
@@ -148,6 +151,7 @@ impl App {
             last_substitute: None,
             confirm_state: None,
             path: None,
+            tree_path: None,
             modified: false,
             message: String::new(),
             quit: false,

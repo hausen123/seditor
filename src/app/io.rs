@@ -1,3 +1,4 @@
+use super::view::render_tree_lines;
 use super::App;
 use crate::node::nodes_from;
 use crate::reader;
@@ -52,6 +53,9 @@ impl App {
         match name {
             "w" => {
                 self.write(argument);
+            }
+            "wt" => {
+                self.write_tree(argument);
             }
             "wq" | "x" => {
                 if self.write(argument) {
@@ -204,6 +208,62 @@ impl App {
                     "wrote {}",
                     path.display()
                 );
+                true
+            }
+            Err(error) => {
+                self.message =
+                    format!("cannot write: {}", error);
+                false
+            }
+        }
+    }
+
+    /// 木の見た目（罫線＋テキスト）をtxtとして書き出す。
+    ///
+    /// 表示モードに関わらず常に木として計算する。
+    /// ソース表示中は、今の内容を読み直して木を組み
+    /// 立て直すだけで、実際のモードは変えない。
+    fn write_tree(&mut self, argument: Option<&str>) -> bool {
+        if let Some(name) = argument {
+            self.tree_path = Some(PathBuf::from(name));
+        }
+
+        let Some(path) = self.tree_path.clone() else {
+            self.message = "no file name".to_string();
+            return false;
+        };
+
+        let lines = if self.source_mode {
+            let text = self
+                .nodes
+                .iter()
+                .map(|node| node.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let reading = match reader::read(&text) {
+                Ok(reading) => reading,
+                Err(error) => {
+                    self.message = format!(
+                        "cannot parse back into a tree: {}",
+                        error
+                    );
+                    return false;
+                }
+            };
+
+            render_tree_lines(&nodes_from(&reading.data))
+        } else {
+            self.tree_lines()
+        };
+
+        let mut text = lines.join("\n");
+        text.push('\n');
+
+        match fs::write(&path, text) {
+            Ok(()) => {
+                self.message =
+                    format!("wrote {}", path.display());
                 true
             }
             Err(error) => {

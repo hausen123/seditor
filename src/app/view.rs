@@ -32,6 +32,105 @@ enum VisualHighlight {
     },
 }
 
+/// indexの罫線プレフィックス。selfに依存しないので、
+/// :wtがソース表示中に一時的に組み直した木にも使える。
+fn node_prefix(nodes: &[Node], index: usize) -> String {
+    let depth = nodes[index].depth;
+
+    if depth == 0 {
+        return String::new();
+    }
+
+    let mut prefix = String::new();
+
+    for level in 0..depth {
+        if level == depth - 1 {
+            if node_is_last_sibling(nodes, index) {
+                prefix.push_str("└── ");
+            } else {
+                prefix.push_str("├── ");
+            }
+        } else {
+            let ancestor =
+                node_find_ancestor(nodes, index, level);
+
+            if node_has_next_sibling(nodes, ancestor) {
+                prefix.push_str("│   ");
+            } else {
+                prefix.push_str("    ");
+            }
+        }
+    }
+
+    prefix
+}
+
+/// indexの祖先のうち、深さlevel+1のものを返す。
+///
+/// levelは罫線の桁番号で、左端が0。
+fn node_find_ancestor(
+    nodes: &[Node],
+    index: usize,
+    level: usize,
+) -> usize {
+    let target_depth = level + 1;
+
+    let mut i = index;
+
+    while i > 0 {
+        i -= 1;
+
+        if nodes[i].depth == target_depth {
+            return i;
+        }
+    }
+
+    0
+}
+
+fn node_has_next_sibling(
+    nodes: &[Node],
+    index: usize,
+) -> bool {
+    let depth = nodes[index].depth;
+
+    for node in &nodes[index + 1..] {
+        let other_depth = node.depth;
+
+        if other_depth < depth {
+            return false;
+        }
+
+        if other_depth == depth {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn node_is_last_sibling(nodes: &[Node], index: usize) -> bool {
+    !node_has_next_sibling(nodes, index)
+}
+
+/// 木として整形した行（罫線＋テキスト、空ノードは◦）を
+/// 常に木のルールで作る。tree_lines()と違い
+/// source_modeを見ず、渡されたノード列をそのまま木として
+/// 扱う。:wtがソース表示中でも木として書き出すために使う。
+pub(super) fn render_tree_lines(
+    nodes: &[Node],
+) -> Vec<String> {
+    (0..nodes.len())
+        .map(|index| {
+            let prefix = node_prefix(nodes, index);
+            let text = &nodes[index].text;
+            let display =
+                if text.is_empty() { "◦" } else { text };
+            format!("{}{}", prefix, display)
+        })
+        .collect()
+}
+
 impl App {
     /// F2。木とソース表示を切り替える。
     pub(super) fn toggle_source_view(&mut self) {
@@ -387,79 +486,7 @@ impl App {
     }
 
     pub(super) fn tree_prefix(&self, index: usize) -> String {
-        let depth = self.nodes[index].depth;
-
-        if depth == 0 {
-            return String::new();
-        }
-
-        let mut prefix = String::new();
-
-        for level in 0..depth {
-            if level == depth - 1 {
-                if self.is_last_sibling(index) {
-                    prefix.push_str("└── ");
-                } else {
-                    prefix.push_str("├── ");
-                }
-            } else {
-                let ancestor =
-                    self.find_ancestor(index, level);
-
-                if self.has_next_sibling(ancestor) {
-                    prefix.push_str("│   ");
-                } else {
-                    prefix.push_str("    ");
-                }
-            }
-        }
-
-        prefix
-    }
-
-    /// indexの祖先のうち、深さlevel+1のものを返す。
-    ///
-    /// levelは罫線の桁番号で、左端が0。
-    fn find_ancestor(
-        &self,
-        index: usize,
-        level: usize,
-    ) -> usize {
-        let target_depth = level + 1;
-
-        let mut i = index;
-
-        while i > 0 {
-            i -= 1;
-
-            if self.nodes[i].depth == target_depth {
-                return i;
-            }
-        }
-
-        0
-    }
-
-    fn has_next_sibling(&self, index: usize) -> bool {
-        let depth = self.nodes[index].depth;
-
-        for i in index + 1..self.nodes.len() {
-            let other_depth = self.nodes[i].depth;
-
-            if other_depth < depth {
-                return false;
-            }
-
-            if other_depth == depth {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_last_sibling(&self, index: usize) -> bool {
-        !self.has_next_sibling(index)
+        node_prefix(&self.nodes, index)
     }
 
     /// 木全体を整形して書き出す。

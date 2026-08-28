@@ -440,6 +440,82 @@ fn commands() {
     let _ = fs::remove_file(&path);
 }
 
+/// :wt は木の見た目（罫線＋テキスト）をtxtとして書く。
+/// 表示モードに関わらず常に木として出力し、ファイル名は
+/// :wと同じく省略時に直前の指定を覚えている。
+#[test]
+fn write_tree_command() {
+    let path = std::env::temp_dir()
+        .join("seditor-write-tree.txt");
+    let _ = fs::remove_file(&path);
+    let name = path.display().to_string();
+
+    let mut app = insert("f\n\ta\n\tb");
+    press(&mut app, "\x1b");
+    assert_eq!(app.to_scheme(), "(f (a b))");
+
+    // ファイル名が無ければ書けない。
+    press(&mut app, ":wt\n");
+    assert_eq!(app.message, "no file name");
+
+    press(&mut app, &format!(":wt {}\n", name));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "f\n└── a\n    └── b\n"
+    );
+
+    // :wと違うpathを別に覚えている（:wはまだ無名）。
+    press(&mut app, ":w\n");
+    assert_eq!(app.message, "no file name");
+
+    // 名前を覚えているので、2回目は省略できる。
+    press(&mut app, "oc\x1b");
+    press(&mut app, ":wt\n");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "f\n└── a\n    ├── b\n    └── c\n"
+    );
+
+    // ソース表示中でも常に木として出力する。
+    app.handle_key(KeyEvent::new(
+        KeyCode::F(2),
+        KeyModifiers::NONE,
+    ));
+    press(&mut app, ":wt\n");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "f\n└── a\n    ├── b\n    └── c\n"
+    );
+    assert!(app.source_mode);
+
+    let _ = fs::remove_file(&path);
+}
+
+/// ソース表示中に壊れた括弧のまま:wtすると、木に
+/// 組み立て直せないのでエラーになり書き込まない。
+#[test]
+fn write_tree_command_parse_error_in_source_view() {
+    let path = std::env::temp_dir()
+        .join("seditor-write-tree-error.txt");
+    let _ = fs::remove_file(&path);
+    let name = path.display().to_string();
+
+    let mut app = insert("x");
+    press(&mut app, "\x1b");
+    app.handle_key(KeyEvent::new(
+        KeyCode::F(2),
+        KeyModifiers::NONE,
+    ));
+    assert!(app.source_mode);
+    press(&mut app, "A(\x1b");
+
+    press(&mut app, &format!(":wt {}\n", name));
+    assert!(app
+        .message
+        .contains("cannot parse back into a tree"));
+    assert!(!path.exists());
+}
+
 /// 読んで印刷し直すと元に戻る。
 ///
 /// 印刷側と読み取り側の食い違いはここで出る。
